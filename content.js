@@ -88,6 +88,26 @@
     return window.g_ck || window.NOW?.user_token || window.NOW?.g_ck || null;
   }
 
+  function keepSessionAlive() {
+    // 1. Reset ServiceNow's client-side UI inactivity listener
+    window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true }));
+    document.dispatchEvent(new CustomEvent('glide:ui_notification.activity'));
+
+    // 2. Touch the lightweight UI session heartbeat endpoint
+    const token = getAuthToken();
+    if (token) {
+      fetch('/api/now/ui/presence', {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'X-UserToken': token
+        },
+        body: JSON.stringify({})
+      }).catch(() => {});
+    }
+  }
+
   let cachedUserId = localStorage.getItem('sn_helper_user_sys_id') || null;
 
   function getCurrentUserId() {
@@ -1615,10 +1635,12 @@
         buildUI();
         fetchTickets();
         fetchChanges();
+        keepSessionAlive();
         checkForExtensionUpdate();
         setInterval(() => {
           fetchTickets();
           fetchChanges();
+          keepSessionAlive();
         }, POLL_INTERVAL_MS);
         setInterval(checkForExtensionUpdate, UPDATE_CHECK_INTERVAL_MS);
       }

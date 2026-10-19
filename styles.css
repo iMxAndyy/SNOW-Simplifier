@@ -843,3 +843,46 @@
 .sn-back-hub-btn:hover {
   background: #475569;
 }
+
+/* --- UPDATE BANNER STYLES --- */
+.sn-update-banner {
+  background: linear-gradient(90deg, #ca8a04, #eab308);
+  color: #0f172a;
+  padding: 12px 24px;
+  font-weight: 600;
+  font-size: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 2px solid #a16207;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  z-index: 10;
+}
+
+.sn-update-banner.sn-hidden {
+  display: none !important;
+}
+
+.sn-update-banner code {
+  background: rgba(15, 23, 42, 0.15);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-weight: 700;
+}
+
+.sn-update-dismiss {
+  background: rgba(15, 23, 42, 0.15);
+  border: 1px solid rgba(15, 23, 42, 0.3);
+  color: #0f172a;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12px;
+  transition: background 0.15s ease;
+}
+
+.sn-update-dismiss:hover {
+  background: rgba(15, 23, 42, 0.25);
+}
