@@ -2,7 +2,7 @@
   if (window.top !== window.self) return;
 
   // Version & GitHub Auto-Check Config
-  const FALLBACK_VERSION = '1.0.0';
+  const FALLBACK_VERSION = '1.0.1';
   const GITHUB_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
 
   const DEFAULT_GROUP = 'UK.RailOps.Level2.Darl.Worldline';
