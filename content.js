@@ -1,8 +1,13 @@
 (function () {
   if (window.top !== window.self) return;
 
+  // Version & GitHub Auto-Check Config
+  const FALLBACK_VERSION = '1.0.1';
+  const GITHUB_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
+
   const DEFAULT_GROUP = 'UK.RailOps.Level2.Darl.Worldline';
   const POLL_INTERVAL_MS = 30000; // 30 seconds
+  const UPDATE_CHECK_INTERVAL_MS = 1800000; // 30 minutes
 
   // Current active view ('hub', 'new_queue', 'cases', or 'changes')
   let currentView = localStorage.getItem('sn_helper_view') || 'hub';
@@ -14,6 +19,7 @@
   let knownGlobalUnassignedCS = new Set();
   let isFirstLoad = true;
   let notificationGroup = localStorage.getItem('sn_helper_notif_group') || DEFAULT_GROUP;
+  let latestAvailableVersion = null;
 
   // --- CASE MANAGEMENT STATE ---
   let selectedGroup = localStorage.getItem('sn_helper_group') || DEFAULT_GROUP;
@@ -29,6 +35,54 @@
   let chgSelectedRequested = localStorage.getItem('sn_helper_chg_requested') || 'ALL';
   let savedChgApprovalsRaw = localStorage.getItem('sn_helper_chg_approvals');
   let chgSelectedApprovals = savedChgApprovalsRaw ? JSON.parse(savedChgApprovalsRaw) : null;
+
+  function getLocalVersion() {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest) {
+        return chrome.runtime.getManifest().version;
+      }
+    } catch (e) {}
+    return FALLBACK_VERSION;
+  }
+
+  function isNewerVersion(localVer, remoteVer) {
+    const lParts = String(localVer).split('.').map(Number);
+    const rParts = String(remoteVer).split('.').map(Number);
+    for (let i = 0; i < Math.max(lParts.length, rParts.length); i++) {
+      const l = lParts[i] || 0;
+      const r = rParts[i] || 0;
+      if (r > l) return true;
+      if (r < l) return false;
+    }
+    return false;
+  }
+
+  async function checkForExtensionUpdate() {
+    try {
+      const res = await fetch(`${GITHUB_MANIFEST_URL}?t=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const remoteManifest = await res.json();
+      const remoteVer = (remoteManifest.version || '').trim();
+      const localVer = getLocalVersion();
+
+      if (remoteVer && isNewerVersion(localVer, remoteVer)) {
+        latestAvailableVersion = remoteVer;
+        const banner = document.getElementById('sn-update-banner');
+        const bannerText = document.getElementById('sn-update-banner-text');
+        const toggleBtn = document.getElementById('sn-helper-toggle');
+
+        if (banner && bannerText) {
+          bannerText.innerHTML = `🚀 <strong>Update Available (v${remoteVer})!</strong> You are currently on v${localVer}. Run <code>Update_Extension.bat</code> in your extension folder, then refresh ServiceNow.`;
+          banner.classList.remove('sn-hidden');
+        }
+        if (toggleBtn && toggleBtn.innerText === 'Open Support Hub') {
+          toggleBtn.innerText = 'Open Support Hub (Update Available!)';
+        }
+      }
+    } catch (err) {
+      // Silently ignore if GitHub repo hasn't been populated yet or blocked by network
+    }
+  }
 
   function getAuthToken() {
     return window.g_ck || window.NOW?.user_token || window.NOW?.g_ck || null;
@@ -51,7 +105,6 @@
     return cachedUserId;
   }
 
-  // Fallback: Queries ServiceNow's server-side gs.getUserID() if window variables aren't exposed
   async function resolveCurrentUserId() {
     const existing = getCurrentUserId();
     if (existing) return existing;
@@ -264,6 +317,8 @@
   }
 
   function buildUI() {
+    const localVer = getLocalVersion();
+
     const toggleBtn = document.createElement('button');
     toggleBtn.id = 'sn-helper-toggle';
     toggleBtn.innerText = 'Open Support Hub';
@@ -278,11 +333,17 @@
     overlay.className = 'sn-hidden';
     
     overlay.innerHTML = `
+      <!-- UPDATE AVAILABLE BANNER -->
+      <div id="sn-update-banner" class="sn-update-banner sn-hidden">
+        <span id="sn-update-banner-text"></span>
+        <button id="sn-update-dismiss" class="sn-update-dismiss">Dismiss</button>
+      </div>
+
       <!-- 1. HUB LANDING VIEW -->
       <div id="sn-view-hub" class="sn-view-section">
         <div class="sn-hub-wrapper">
           <div class="sn-hub-hero">
-            <h1>Support Hub</h1>
+            <h1>Support Hub <span style="font-size: 14px; font-weight: 500; color: #64748b; vertical-align: middle;">v${localVer}</span></h1>
             <p>Fast-access operational workspace for ServiceNow. Triage incoming unassigned tickets, search existing cases, or review change requests while background monitoring runs continuously.</p>
           </div>
 
@@ -572,6 +633,10 @@
     `;
     document.body.appendChild(notifModal);
 
+    document.getElementById('sn-update-dismiss').addEventListener('click', () => {
+      document.getElementById('sn-update-banner').classList.add('sn-hidden');
+    });
+
     document.getElementById('sn-go-new-queue').addEventListener('click', () => switchView('new_queue'));
     document.getElementById('sn-go-cases').addEventListener('click', () => switchView('cases'));
     document.getElementById('sn-go-changes').addEventListener('click', () => switchView('changes'));
@@ -643,7 +708,9 @@
     function setOverlayVisibility(hidden) {
       if (hidden) {
         overlay.classList.add('sn-hidden');
-        toggleBtn.innerText = 'Open Support Hub';
+        toggleBtn.innerText = latestAvailableVersion
+          ? 'Open Support Hub (Update Available!)'
+          : 'Open Support Hub';
       } else {
         overlay.classList.remove('sn-hidden');
         toggleBtn.innerText = 'Hide Support Hub';
@@ -726,7 +793,6 @@
     return match ? match[1] : 'OTHER';
   }
 
-  // Helper to check if a ticket is strictly CS or INC
   function isCaseOrInc(number) {
     const prefix = getTicketPrefix(number);
     return prefix === 'CS' || prefix === 'INC';
@@ -745,7 +811,6 @@
       if (statusText) statusText.innerText = 'Refreshing CS & INC tickets...';
       if (newqStatusText) newqStatusText.innerText = 'Checking for unassigned CS & INC tickets...';
 
-      // Use ^NQ (New Query union) so both CS and INC branches strictly obey active=true and group filters
       const globalQuery = 'active=true^numberSTARTSWITHCS^numberNOT LIKECSTASK^NQactive=true^numberSTARTSWITHINC^ORDERBYDESCsys_created_on';
       const globalUrl = `/api/now/table/task?sysparm_query=${encodeURIComponent(globalQuery)}&sysparm_limit=500&sysparm_display_value=true&sysparm_fields=${fields}`;
 
@@ -777,7 +842,6 @@
       allTickets = Array.from(ticketMap.values());
 
       const bgPayload = jsonPayloads[jsonPayloads.length - 1];
-      // Include both CS and INC in the New Ticket Queue and background alerts
       unassignedQueueCS = (bgPayload.result || []).filter((t) => isCaseOrInc(t.number));
       
       unassignedQueueCS.forEach((t) => {
@@ -1551,10 +1615,12 @@
         buildUI();
         fetchTickets();
         fetchChanges();
+        checkForExtensionUpdate();
         setInterval(() => {
           fetchTickets();
           fetchChanges();
         }, POLL_INTERVAL_MS);
+        setInterval(checkForExtensionUpdate, UPDATE_CHECK_INTERVAL_MS);
       }
     }, 1500);
   }
