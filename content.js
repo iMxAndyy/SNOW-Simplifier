@@ -2,8 +2,9 @@
   if (window.top !== window.self) return;
 
   // Version & GitHub Auto-Check Config
-  const FALLBACK_VERSION = '1.0.1';
-  const GITHUB_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
+  const FALLBACK_VERSION = '1.0.0';
+  const GITHUB_API_MANIFEST_URL = 'https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/manifest.json?ref=main';
+  const GITHUB_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
 
   const DEFAULT_GROUP = 'UK.RailOps.Level2.Darl.Worldline';
   const POLL_INTERVAL_MS = 30000; // 30 seconds
@@ -72,9 +73,32 @@
     }
 
     try {
-      const res = await fetch(`${GITHUB_MANIFEST_URL}?t=${Date.now()}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const remoteManifest = await res.json();
+      let remoteManifest = null;
+
+      // 1. Try GitHub API first (Bypasses the 5-minute raw CDN cache completely)
+      try {
+        const apiRes = await fetch(`${GITHUB_API_MANIFEST_URL}&_=${Date.now()}`, {
+          headers: { 'Accept': 'application/vnd.github.v3+json' },
+          cache: 'no-store'
+        });
+        if (apiRes.ok) {
+          const apiData = await apiRes.json();
+          if (apiData && apiData.content) {
+            const decoded = atob(apiData.content.replace(/\s/g, ''));
+            remoteManifest = JSON.parse(decoded);
+          }
+        }
+      } catch (apiErr) {
+        console.warn('GitHub API check fell back to raw URL:', apiErr);
+      }
+
+      // 2. Fallback to Raw URL if API rate-limited or blocked
+      if (!remoteManifest) {
+        const rawRes = await fetch(`${GITHUB_RAW_MANIFEST_URL}?t=${Date.now()}`, { cache: 'no-store' });
+        if (!rawRes.ok) throw new Error(`HTTP ${rawRes.status}`);
+        remoteManifest = await rawRes.json();
+      }
+
       const remoteVer = (remoteManifest.version || '').trim();
 
       if (remoteVer && isNewerVersion(localVer, remoteVer)) {
@@ -92,15 +116,15 @@
         }
         if (isManual && statusSpan) {
           statusSpan.style.color = '#eab308';
-          statusSpan.innerText = `Update found: v${remoteVer}!`;
+          statusSpan.innerText = `Update found! (Local: v${localVer} → GitHub: v${remoteVer})`;
         }
       } else {
         if (isManual && statusSpan) {
           statusSpan.style.color = '#22c55e';
-          statusSpan.innerText = `Up to date (v${localVer})`;
+          statusSpan.innerText = `Up to date (Local: v${localVer} | GitHub: v${remoteVer || '?'})`;
           setTimeout(() => {
             if (statusSpan.innerText.includes('Up to date')) statusSpan.innerText = '';
-          }, 5000);
+          }, 8000);
         }
       }
     } catch (err) {
@@ -108,7 +132,7 @@
         console.warn('SN Helper Update Check Error:', err);
         if (statusSpan) {
           statusSpan.style.color = '#ef4444';
-          statusSpan.innerText = 'Check failed (See console)';
+          statusSpan.innerText = `Check failed: ${err.message}`;
         }
       }
     } finally {
