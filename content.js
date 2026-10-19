@@ -2,7 +2,7 @@
   if (window.top !== window.self) return;
 
   // Version & GitHub Auto-Check Config
-  const FALLBACK_VERSION = '1.0.1 ';
+  const FALLBACK_VERSION = '1.0.0';
   const GITHUB_API_MANIFEST_URL = 'https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/manifest.json?ref=main';
   const GITHUB_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
 
@@ -58,19 +58,8 @@
     return false;
   }
 
-  async function checkForExtensionUpdate(isManual = false) {
-    const btn = document.getElementById('sn-check-update-btn');
-    const statusSpan = document.getElementById('sn-update-check-status');
+  async function checkForExtensionUpdate() {
     const localVer = getLocalVersion();
-
-    if (isManual && btn) {
-      btn.disabled = true;
-      btn.innerText = 'Checking...';
-      if (statusSpan) {
-        statusSpan.style.color = '#94a3b8';
-        statusSpan.innerText = 'Contacting GitHub...';
-      }
-    }
 
     try {
       let remoteManifest = null;
@@ -89,13 +78,13 @@
           }
         }
       } catch (apiErr) {
-        console.warn('GitHub API check fell back to raw URL:', apiErr);
+        // Fallback to raw URL silently if API fails
       }
 
       // 2. Fallback to Raw URL if API rate-limited or blocked
       if (!remoteManifest) {
         const rawRes = await fetch(`${GITHUB_RAW_MANIFEST_URL}?t=${Date.now()}`, { cache: 'no-store' });
-        if (!rawRes.ok) throw new Error(`HTTP ${rawRes.status}`);
+        if (!rawRes.ok) return;
         remoteManifest = await rawRes.json();
       }
 
@@ -114,32 +103,9 @@
         if (toggleBtn && toggleBtn.innerText === 'Open Support Hub') {
           toggleBtn.innerText = 'Open Support Hub (Update Available!)';
         }
-        if (isManual && statusSpan) {
-          statusSpan.style.color = '#eab308';
-          statusSpan.innerText = `Update found! (Local: v${localVer} → GitHub: v${remoteVer})`;
-        }
-      } else {
-        if (isManual && statusSpan) {
-          statusSpan.style.color = '#22c55e';
-          statusSpan.innerText = `Up to date (Local: v${localVer} | GitHub: v${remoteVer || '?'})`;
-          setTimeout(() => {
-            if (statusSpan.innerText.includes('Up to date')) statusSpan.innerText = '';
-          }, 8000);
-        }
       }
     } catch (err) {
-      if (isManual) {
-        console.warn('SN Helper Update Check Error:', err);
-        if (statusSpan) {
-          statusSpan.style.color = '#ef4444';
-          statusSpan.innerText = `Check failed: ${err.message}`;
-        }
-      }
-    } finally {
-      if (isManual && btn) {
-        btn.disabled = false;
-        btn.innerText = '↻ Check for Updates';
-      }
+      // Silently ignore if GitHub repo hasn't been populated yet or blocked by network
     }
   }
 
@@ -421,15 +387,9 @@
       <!-- 1. HUB LANDING VIEW -->
       <div id="sn-view-hub" class="sn-view-section">
         <div class="sn-hub-wrapper">
-          <div class="sn-hub-hero" style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;">
-            <div>
-              <h1>Support Hub <span style="font-size: 14px; font-weight: 500; color: #64748b; vertical-align: middle;">v${localVer}</span></h1>
-              <p>Fast-access operational workspace for ServiceNow. Triage incoming unassigned tickets, search existing cases, or review change requests while background monitoring runs continuously.</p>
-            </div>
-            <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0;">
-              <button class="sn-btn" id="sn-check-update-btn" style="background: #334155; font-size: 12px; padding: 8px 14px;">↻ Check for Updates</button>
-              <span id="sn-update-check-status" style="font-size: 11px; color: #94a3b8; font-weight: 500;"></span>
-            </div>
+          <div class="sn-hub-hero">
+            <h1>Support Hub <span style="font-size: 14px; font-weight: 500; color: #64748b; vertical-align: middle;">v${localVer}</span></h1>
+            <p>Fast-access operational workspace for ServiceNow. Triage incoming unassigned tickets, search existing cases, or review change requests while background monitoring runs continuously.</p>
           </div>
 
           <div class="sn-hub-grid">
@@ -720,11 +680,6 @@
 
     document.getElementById('sn-update-dismiss').addEventListener('click', () => {
       document.getElementById('sn-update-banner').classList.add('sn-hidden');
-    });
-
-    document.getElementById('sn-check-update-btn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      checkForExtensionUpdate(true);
     });
 
     document.getElementById('sn-go-new-queue').addEventListener('click', () => switchView('new_queue'));
@@ -1706,13 +1661,13 @@
         fetchTickets();
         fetchChanges();
         keepSessionAlive();
-        checkForExtensionUpdate(false);
+        checkForExtensionUpdate();
         setInterval(() => {
           fetchTickets();
           fetchChanges();
           keepSessionAlive();
         }, POLL_INTERVAL_MS);
-        setInterval(() => checkForExtensionUpdate(false), UPDATE_CHECK_INTERVAL_MS);
+        setInterval(checkForExtensionUpdate, UPDATE_CHECK_INTERVAL_MS);
       }
     }, 1500);
   }
