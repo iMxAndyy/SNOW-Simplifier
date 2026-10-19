@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "ServiceNow Simplifier Dashboard",
+  "version": "1.0.0",
+  "description": "Auto-refreshing ticket queue and simplified UI for ServiceNow",
+  "content_scripts": [
+    {
+      "matches": ["https://wluk.service-now.com/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    }
+  ]
+}
