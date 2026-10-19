@@ -2,7 +2,7 @@
   if (window.top !== window.self) return;
 
   // Version & GitHub Auto-Check Config
-  const FALLBACK_VERSION = '1.0.1';
+  const FALLBACK_VERSION = '1.0.0';
   const GITHUB_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
 
   const DEFAULT_GROUP = 'UK.RailOps.Level2.Darl.Worldline';
@@ -57,13 +57,25 @@
     return false;
   }
 
-  async function checkForExtensionUpdate() {
+  async function checkForExtensionUpdate(isManual = false) {
+    const btn = document.getElementById('sn-check-update-btn');
+    const statusSpan = document.getElementById('sn-update-check-status');
+    const localVer = getLocalVersion();
+
+    if (isManual && btn) {
+      btn.disabled = true;
+      btn.innerText = 'Checking...';
+      if (statusSpan) {
+        statusSpan.style.color = '#94a3b8';
+        statusSpan.innerText = 'Contacting GitHub...';
+      }
+    }
+
     try {
       const res = await fetch(`${GITHUB_MANIFEST_URL}?t=${Date.now()}`, { cache: 'no-store' });
-      if (!res.ok) return;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const remoteManifest = await res.json();
       const remoteVer = (remoteManifest.version || '').trim();
-      const localVer = getLocalVersion();
 
       if (remoteVer && isNewerVersion(localVer, remoteVer)) {
         latestAvailableVersion = remoteVer;
@@ -78,9 +90,32 @@
         if (toggleBtn && toggleBtn.innerText === 'Open Support Hub') {
           toggleBtn.innerText = 'Open Support Hub (Update Available!)';
         }
+        if (isManual && statusSpan) {
+          statusSpan.style.color = '#eab308';
+          statusSpan.innerText = `Update found: v${remoteVer}!`;
+        }
+      } else {
+        if (isManual && statusSpan) {
+          statusSpan.style.color = '#22c55e';
+          statusSpan.innerText = `Up to date (v${localVer})`;
+          setTimeout(() => {
+            if (statusSpan.innerText.includes('Up to date')) statusSpan.innerText = '';
+          }, 5000);
+        }
       }
     } catch (err) {
-      // Silently ignore if GitHub repo hasn't been populated yet or blocked by network
+      if (isManual) {
+        console.warn('SN Helper Update Check Error:', err);
+        if (statusSpan) {
+          statusSpan.style.color = '#ef4444';
+          statusSpan.innerText = 'Check failed (See console)';
+        }
+      }
+    } finally {
+      if (isManual && btn) {
+        btn.disabled = false;
+        btn.innerText = '↻ Check for Updates';
+      }
     }
   }
 
@@ -362,9 +397,15 @@
       <!-- 1. HUB LANDING VIEW -->
       <div id="sn-view-hub" class="sn-view-section">
         <div class="sn-hub-wrapper">
-          <div class="sn-hub-hero">
-            <h1>Support Hub <span style="font-size: 14px; font-weight: 500; color: #64748b; vertical-align: middle;">v${localVer}</span></h1>
-            <p>Fast-access operational workspace for ServiceNow. Triage incoming unassigned tickets, search existing cases, or review change requests while background monitoring runs continuously.</p>
+          <div class="sn-hub-hero" style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;">
+            <div>
+              <h1>Support Hub <span style="font-size: 14px; font-weight: 500; color: #64748b; vertical-align: middle;">v${localVer}</span></h1>
+              <p>Fast-access operational workspace for ServiceNow. Triage incoming unassigned tickets, search existing cases, or review change requests while background monitoring runs continuously.</p>
+            </div>
+            <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0;">
+              <button class="sn-btn" id="sn-check-update-btn" style="background: #334155; font-size: 12px; padding: 8px 14px;">↻ Check for Updates</button>
+              <span id="sn-update-check-status" style="font-size: 11px; color: #94a3b8; font-weight: 500;"></span>
+            </div>
           </div>
 
           <div class="sn-hub-grid">
@@ -655,6 +696,11 @@
 
     document.getElementById('sn-update-dismiss').addEventListener('click', () => {
       document.getElementById('sn-update-banner').classList.add('sn-hidden');
+    });
+
+    document.getElementById('sn-check-update-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      checkForExtensionUpdate(true);
     });
 
     document.getElementById('sn-go-new-queue').addEventListener('click', () => switchView('new_queue'));
@@ -1636,13 +1682,13 @@
         fetchTickets();
         fetchChanges();
         keepSessionAlive();
-        checkForExtensionUpdate();
+        checkForExtensionUpdate(false);
         setInterval(() => {
           fetchTickets();
           fetchChanges();
           keepSessionAlive();
         }, POLL_INTERVAL_MS);
-        setInterval(checkForExtensionUpdate, UPDATE_CHECK_INTERVAL_MS);
+        setInterval(() => checkForExtensionUpdate(false), UPDATE_CHECK_INTERVAL_MS);
       }
     }, 1500);
   }
