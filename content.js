@@ -2,7 +2,7 @@
   if (window.top !== window.self) return;
 
   // Version & GitHub Auto-Check Config
-  const FALLBACK_VERSION = '1.0.0';
+  const FALLBACK_VERSION = '1.0.1';
   const GITHUB_API_MANIFEST_URL = 'https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/manifest.json?ref=main';
   const GITHUB_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
 
@@ -94,14 +94,10 @@
         latestAvailableVersion = remoteVer;
         const banner = document.getElementById('sn-update-banner');
         const bannerText = document.getElementById('sn-update-banner-text');
-        const toggleBtn = document.getElementById('sn-helper-toggle');
 
         if (banner && bannerText) {
           bannerText.innerHTML = `🚀 <strong>Update Available (v${remoteVer})!</strong> You are currently on v${localVer}. Run <code>Update_Extension.bat</code> in your extension folder, then refresh ServiceNow.`;
           banner.classList.remove('sn-hidden');
-        }
-        if (toggleBtn && toggleBtn.innerText === 'Open Support Hub') {
-          toggleBtn.innerText = 'Open Support Hub (Update Available!)';
         }
       }
     } catch (err) {
@@ -113,24 +109,33 @@
     return window.g_ck || window.NOW?.user_token || window.NOW?.g_ck || null;
   }
 
-  function keepSessionAlive() {
-    // 1. Reset ServiceNow's client-side UI inactivity listener
-    window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true }));
-    document.dispatchEvent(new CustomEvent('glide:ui_notification.activity'));
+  let lastDeepKeepAlive = 0;
 
-    // 2. Touch the lightweight UI session heartbeat endpoint
+  function keepSessionAlive() {
     const token = getAuthToken();
-    if (token) {
-      fetch('/api/now/ui/presence', {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-          'X-UserToken': token
-        },
-        body: JSON.stringify({})
-      }).catch(() => {});
-    }
+    if (!token) return;
+
+    // Use ServiceNow's built-in UserPreference processor endpoint.
+    // This is a lightweight backend transaction that securely resets the server-side session timer
+    // without touching the UI DOM or triggering any page refreshes or flashes.
+    fetch(`/xmlhttp.do?sysparm_processor=UserPreference&sysparm_type=get&sysparm_name=my_home_navigation_page&_=${Date.now()}`, {
+      method: 'GET',
+      credentials: 'include',
+      headers: {
+        'X-UserToken': token
+      }
+    }).catch(() => {});
+
+    // Auto-click any unexpected session warning modal buttons if they appear on screen
+    try {
+      const buttons = Array.from(document.querySelectorAll('button, now-button'));
+      for (const btn of buttons) {
+        const text = (btn.innerText || btn.textContent || '').toLowerCase();
+        if (text.includes('keep working') || text.includes('extend session') || text.includes('stay logged in')) {
+          btn.click();
+        }
+      }
+    } catch (e) {}
   }
 
   let cachedUserId = localStorage.getItem('sn_helper_user_sys_id') || null;
@@ -873,7 +878,12 @@
 
       const responses = await Promise.all(requests);
       for (const r of responses) {
-        if (!r.ok) throw new Error(`HTTP ${r.status} - Session expired.`);
+        if (r.status === 401 || r.status === 403) {
+          if (statusText) statusText.innerText = 'Session expired or unauthorized. Please log in or refresh the page.';
+          if (newqStatusText) newqStatusText.innerText = 'Session expired. Waiting for login...';
+          return; // Exit cleanly without throwing an error
+        }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
       }
 
       const jsonPayloads = await Promise.all(responses.map((r) => r.json()));
@@ -907,9 +917,9 @@
       applyFiltersAndRender();
       renderNewTicketQueue();
     } catch (err) {
-      console.error('SN Helper Fetch Error:', err);
-      if (statusText) statusText.innerText = `Error: ${err.message}. Check login session.`;
-      if (newqStatusText) newqStatusText.innerText = `Error: ${err.message}.`;
+      console.warn('SN Helper Fetch Warning:', err.message);
+      if (statusText) statusText.innerText = `Connection issue (${err.message}). Retrying...`;
+      if (newqStatusText) newqStatusText.innerText = `Connection issue (${err.message}).`;
     }
   }
 
@@ -1187,6 +1197,10 @@
 
       const responses = await Promise.all(requests);
       for (const r of responses) {
+        if (r.status === 401 || r.status === 403) {
+          if (statusText) statusText.innerText = 'Session expired or unauthorized. Please log in or refresh the page.';
+          return; // Exit cleanly without throwing an error
+        }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
       }
 
@@ -1202,8 +1216,8 @@
       updateChangeDropdowns();
       applyChangeFiltersAndRender();
     } catch (err) {
-      console.error('SN Helper Change Fetch Error:', err);
-      if (statusText) statusText.innerText = `Error: ${err.message}.`;
+      console.warn('SN Helper Change Fetch Warning:', err.message);
+      if (statusText) statusText.innerText = `Connection issue (${err.message}).`;
     }
   }
 
