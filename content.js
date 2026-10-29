@@ -2,7 +2,7 @@
   if (window.top !== window.self) return;
 
   // Version & GitHub Auto-Check Config
-  const FALLBACK_VERSION = '1.0.1';
+  const FALLBACK_VERSION = '1.0.3';
   const GITHUB_API_MANIFEST_URL = 'https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/manifest.json?ref=main';
   const GITHUB_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
 
@@ -18,6 +18,7 @@
   let unassignedQueueCS = [];
   let userMemberGroups = [];
   let knownGlobalUnassignedCS = new Set();
+  let knownGlobalUnassignedCS = new Set();
   let isFirstLoad = true;
   let notificationGroup = localStorage.getItem('sn_helper_notif_group') || DEFAULT_GROUP;
   let latestAvailableVersion = null;
@@ -29,13 +30,29 @@
   let savedStatesRaw = localStorage.getItem('sn_helper_states');
   let selectedStates = savedStatesRaw ? JSON.parse(savedStatesRaw) : null;
 
-  // --- CHANGE MANAGEMENT STATE ---
+  // --- CHANGE MANAGEMENT & TASK VIEWER STATE ---
   let allChanges = [];
+  let myUpcomingChanges = [];
+  let isFirstChangeLoad = true;
+  let notifiedChangeStart = new Set(JSON.parse(sessionStorage.getItem('sn_notified_chg_start') || '[]'));
+  let notifiedChangeEnd = new Set(JSON.parse(sessionStorage.getItem('sn_notified_chg_end') || '[]'));
+
   let chgSelectedGroup = localStorage.getItem('sn_helper_chg_group') || DEFAULT_GROUP;
   let chgSelectedAssigned = localStorage.getItem('sn_helper_chg_assigned') || 'ALL';
   let chgSelectedRequested = localStorage.getItem('sn_helper_chg_requested') || 'ALL';
   let savedChgApprovalsRaw = localStorage.getItem('sn_helper_chg_approvals');
   let chgSelectedApprovals = savedChgApprovalsRaw ? JSON.parse(savedChgApprovalsRaw) : null;
+
+  // --- CURRENT USER IDENTITY ---
+  let cachedUserId = localStorage.getItem('sn_helper_user_sys_id') || null;
+  let cachedUserName = localStorage.getItem('sn_helper_user_full_name') || null;
+
+  function saveNotifiedChangeSets() {
+    try {
+      sessionStorage.setItem('sn_notified_chg_start', JSON.stringify(Array.from(notifiedChangeStart)));
+      sessionStorage.setItem('sn_notified_chg_end', JSON.stringify(Array.from(notifiedChangeEnd)));
+    } catch (e) {}
+  }
 
   function getLocalVersion() {
     try {
@@ -94,10 +111,14 @@
         latestAvailableVersion = remoteVer;
         const banner = document.getElementById('sn-update-banner');
         const bannerText = document.getElementById('sn-update-banner-text');
+        const toggleBtn = document.getElementById('sn-helper-toggle');
 
         if (banner && bannerText) {
           bannerText.innerHTML = `🚀 <strong>Update Available (v${remoteVer})!</strong> You are currently on v${localVer}. Run <code>Update_Extension.bat</code> in your extension folder, then refresh ServiceNow.`;
           banner.classList.remove('sn-hidden');
+        }
+        if (toggleBtn && toggleBtn.innerText === 'Open Support Hub') {
+          toggleBtn.innerText = 'Open Support Hub (Update Available!)';
         }
       }
     } catch (err) {
@@ -109,15 +130,10 @@
     return window.g_ck || window.NOW?.user_token || window.NOW?.g_ck || null;
   }
 
-  let lastDeepKeepAlive = 0;
-
   function keepSessionAlive() {
     const token = getAuthToken();
     if (!token) return;
 
-    // Use ServiceNow's built-in UserPreference processor endpoint.
-    // This is a lightweight backend transaction that securely resets the server-side session timer
-    // without touching the UI DOM or triggering any page refreshes or flashes.
     fetch(`/xmlhttp.do?sysparm_processor=UserPreference&sysparm_type=get&sysparm_name=my_home_navigation_page&_=${Date.now()}`, {
       method: 'GET',
       credentials: 'include',
@@ -126,7 +142,6 @@
       }
     }).catch(() => {});
 
-    // Auto-click any unexpected session warning modal buttons if they appear on screen
     try {
       const buttons = Array.from(document.querySelectorAll('button, now-button'));
       for (const btn of buttons) {
@@ -137,8 +152,6 @@
       }
     } catch (e) {}
   }
-
-  let cachedUserId = localStorage.getItem('sn_helper_user_sys_id') || null;
 
   function getCurrentUserId() {
     if (cachedUserId) return cachedUserId;
@@ -155,12 +168,27 @@
     return cachedUserId;
   }
 
+  function getCurrentUserName() {
+    if (cachedUserName) return cachedUserName;
+    const fromWindow =
+      window.g_user?.getFullName?.() ||
+      window.NOW?.user?.displayName ||
+      window.NOW?.user_display_name ||
+      null;
+    if (fromWindow) {
+      cachedUserName = fromWindow;
+      localStorage.setItem('sn_helper_user_full_name', cachedUserName);
+    }
+    return cachedUserName;
+  }
+
   async function resolveCurrentUserId() {
-    const existing = getCurrentUserId();
-    if (existing) return existing;
+    const existingId = getCurrentUserId();
+    const existingName = getCurrentUserName();
+    if (existingId && existingName) return existingId;
 
     const token = getAuthToken();
-    if (!token) return null;
+    if (!token) return existingId;
 
     try {
       const res = await fetch('/api/now/table/sys_user?sysparm_query=sys_id=javascript:gs.getUserID()&sysparm_fields=sys_id,name&sysparm_limit=1', {
@@ -168,21 +196,33 @@
       });
       if (res.ok) {
         const data = (await res.json()).result || [];
-        if (data.length > 0 && data[0].sys_id) {
-          cachedUserId = data[0].sys_id;
-          localStorage.setItem('sn_helper_user_sys_id', cachedUserId);
+        if (data.length > 0) {
+          if (data[0].sys_id) {
+            cachedUserId = data[0].sys_id;
+            localStorage.setItem('sn_helper_user_sys_id', cachedUserId);
+          }
+          if (data[0].name) {
+            cachedUserName = data[0].name;
+            localStorage.setItem('sn_helper_user_full_name', cachedUserName);
+          }
           return cachedUserId;
         }
       }
     } catch (err) {
-      console.warn('Could not resolve user sys_id from API:', err);
+      console.warn('Could not resolve user identity from API:', err);
     }
-    return null;
+    return existingId;
   }
 
   function getVal(field) {
     if (!field) return '';
     if (typeof field === 'object') return (field.display_value || field.value || '').trim();
+    return String(field).trim();
+  }
+
+  function getRawVal(field) {
+    if (!field) return '';
+    if (typeof field === 'object') return (field.value || field.display_value || '').trim();
     return String(field).trim();
   }
 
@@ -192,6 +232,27 @@
       if (val) return val;
     }
     return '';
+  }
+
+  function parseSNDate(dateStr) {
+    if (!dateStr) return null;
+    const clean = String(dateStr).trim();
+    if (!clean) return null;
+
+    // Try standard ISO / YYYY-MM-DD HH:mm:ss
+    const isoAttempt = new Date(clean.replace(' ', 'T'));
+    if (!isNaN(isoAttempt.getTime())) return isoAttempt;
+
+    // Try UK format DD/MM/YYYY HH:mm:ss or DD-MM-YYYY HH:mm:ss
+    const ukMatch = clean.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?/);
+    if (ukMatch) {
+      const [, day, month, year, hours = '00', mins = '00', secs = '00'] = ukMatch;
+      const parsed = new Date(Number(year), Number(month) - 1, Number(day), Number(hours), Number(mins), Number(secs));
+      if (!isNaN(parsed.getTime())) return parsed;
+    }
+
+    const fallback = new Date(clean);
+    return isNaN(fallback.getTime()) ? null : fallback;
   }
 
   function playNotificationSound() {
@@ -273,6 +334,80 @@
       n.onclick = () => {
         window.focus();
         jumpToNewTicketQueue();
+        n.close();
+      };
+    }
+  }
+
+  function sendChangeWindowNotification(changeRecord, eventType) {
+    playNotificationSound();
+
+    const sysId = getRawVal(changeRecord.sys_id) || getVal(changeRecord.sys_id);
+    const number = getVal(changeRecord.number);
+    const shortDesc = getVal(changeRecord.short_description) || 'No description provided';
+    const startDisp = getVal(changeRecord.start_date) || 'Now';
+    const endDisp = getVal(changeRecord.end_date) || '—';
+
+    const isStart = eventType === 'START';
+    const headerTitle = isStart ? '🟢 Change Window Started' : '⚠️ Change Window Ended — Review/Close';
+    const borderColor = isStart ? '#22c55e' : '#f59e0b';
+    const subInfo = isStart
+      ? `Scheduled: ${startDisp} → ${endDisp}`
+      : `Window ended (${endDisp}). Please progress from Implement to Review/Close.`;
+
+    const container = document.getElementById('sn-toast-container');
+    if (container) {
+      const toast = document.createElement('div');
+      toast.className = 'sn-toast';
+      toast.style.borderLeftColor = borderColor;
+      toast.innerHTML = `
+        <div class="sn-toast-header">
+          <span>${headerTitle}</span>
+          <button class="sn-toast-close" title="Dismiss">&times;</button>
+        </div>
+        <div class="sn-toast-title">${number}</div>
+        <div class="sn-toast-desc">${shortDesc}<br><span style="font-size:11px; color:#cbd5e1;">${subInfo}</span></div>
+        <div class="sn-toast-cta">Click to view Change Request →</div>
+      `;
+
+      toast.querySelector('.sn-toast-close').addEventListener('click', (e) => {
+        e.stopPropagation();
+        toast.remove();
+      });
+
+      toast.addEventListener('click', () => {
+        const overlay = document.getElementById('sn-helper-overlay');
+        const toggleBtn = document.getElementById('sn-helper-toggle');
+        if (overlay && overlay.classList.contains('sn-hidden')) {
+          overlay.classList.remove('sn-hidden');
+          if (toggleBtn) toggleBtn.innerText = 'Hide Support Hub';
+        }
+        switchView('hub');
+        if (sysId) openTicketPreview(sysId, 'CHG');
+        toast.remove();
+      });
+
+      container.appendChild(toast);
+      setTimeout(() => {
+        if (toast.parentNode) toast.remove();
+      }, 20000);
+    }
+
+    if (Notification.permission === 'granted') {
+      const n = new Notification(`${headerTitle}: ${number}`, {
+        body: `${shortDesc}\n${subInfo}`,
+        tag: `${number}_${eventType}`
+      });
+      n.onclick = () => {
+        window.focus();
+        const overlay = document.getElementById('sn-helper-overlay');
+        const toggleBtn = document.getElementById('sn-helper-toggle');
+        if (overlay && overlay.classList.contains('sn-hidden')) {
+          overlay.classList.remove('sn-hidden');
+          if (toggleBtn) toggleBtn.innerText = 'Hide Support Hub';
+        }
+        switchView('hub');
+        if (sysId) openTicketPreview(sysId, 'CHG');
         n.close();
       };
     }
@@ -391,55 +526,80 @@
 
       <!-- 1. HUB LANDING VIEW -->
       <div id="sn-view-hub" class="sn-view-section">
-        <div class="sn-hub-wrapper">
-          <div class="sn-hub-hero">
-            <h1>Support Hub <span style="font-size: 14px; font-weight: 500; color: #64748b; vertical-align: middle;">v${localVer}</span></h1>
-            <p>Fast-access operational workspace for ServiceNow. Triage incoming unassigned tickets, search existing cases, or review change requests while background monitoring runs continuously.</p>
-          </div>
-
-          <div class="sn-hub-grid">
-            <div class="sn-hub-card" id="sn-go-new-queue">
-              <div class="sn-hub-card-header">
-                <h3>New Ticket Queue</h3>
-                <span class="sn-hub-badge" id="sn-hub-unassigned-count">0 Unassigned</span>
-              </div>
-              <p>Dedicated triage queue for incoming unassigned CS cases and INC incidents. Clicking any new ticket alert brings you straight here without affecting your Case Management filters.</p>
+        <!-- LEFT/CENTER MAIN WORKSPACE (Auto-centers in remaining space) -->
+        <div class="sn-hub-main-area">
+          <div class="sn-hub-wrapper" id="sn-hub-wrapper">
+            <div class="sn-hub-hero">
+              <h1>Support Hub <span style="font-size: 14px; font-weight: 500; color: #64748b; vertical-align: middle;">v${localVer}</span></h1>
+              <p>Fast-access operational workspace for ServiceNow. Triage incoming unassigned tickets, search existing cases, or review change requests while background monitoring runs continuously.</p>
               
-              <div class="sn-hub-card-alert-box">
-                <div class="sn-hub-alert-title">
-                  <span class="sn-hub-alert-dot" id="sn-hub-alert-dot"></span>
-                  Background Alert Monitor
+              <div class="sn-hub-search-wrap">
+                <div class="sn-hub-search-box">
+                  <input type="text" id="sn-hub-search-input" class="sn-hub-search-input" placeholder="Search ticket number (e.g., CS1234567, INC..., CHG...)" autocomplete="off" />
+                  <button id="sn-hub-search-btn" class="sn-hub-search-btn">Search Ticket</button>
                 </div>
-                <div class="sn-hub-alert-sub" id="sn-hub-alert-sub">Checking status...</div>
-              </div>
-
-              <div class="sn-hub-card-actions">
-                <button class="sn-hub-card-btn" id="sn-hub-open-newq-btn">Open New Queue →</button>
-                <button class="sn-hub-card-btn secondary" id="sn-hub-notif-btn">Manage Alerts</button>
+                <div id="sn-hub-search-msg" class="sn-hub-search-msg"></div>
               </div>
             </div>
 
-            <div class="sn-hub-card" id="sn-go-cases">
-              <div class="sn-hub-card-header">
-                <h3>Case Management (CS & INC)</h3>
-              </div>
-              <p>Browse, filter, and review existing Customer Service (CS) and Incident (INC) tickets across assignment groups, states, and assigned team members.</p>
-              <div class="sn-hub-card-actions">
-                <button class="sn-hub-card-btn">Open Case Management →</button>
-              </div>
-            </div>
+            <div class="sn-hub-grid">
+              <div class="sn-hub-card" id="sn-go-new-queue">
+                <div class="sn-hub-card-header">
+                  <h3>New Ticket Queue</h3>
+                  <span class="sn-hub-badge" id="sn-hub-unassigned-count">0 Unassigned</span>
+                </div>
+                <p>Dedicated triage queue for incoming unassigned CS cases and INC incidents. Clicking any new ticket alert brings you straight here without affecting your Case Management filters.</p>
+                
+                <div class="sn-hub-card-alert-box">
+                  <div class="sn-hub-alert-title">
+                    <span class="sn-hub-alert-dot" id="sn-hub-alert-dot"></span>
+                    Background Alert Monitor
+                  </div>
+                  <div class="sn-hub-alert-sub" id="sn-hub-alert-sub">Checking status...</div>
+                </div>
 
-            <div class="sn-hub-card" id="sn-go-changes">
-              <div class="sn-hub-card-header">
-                <h3>Change Management (CHG)</h3>
+                <div class="sn-hub-card-actions">
+                  <button class="sn-hub-card-btn" id="sn-hub-open-newq-btn">Open New Queue →</button>
+                  <button class="sn-hub-card-btn secondary" id="sn-hub-notif-btn">Manage Alerts</button>
+                </div>
               </div>
-              <p>Review scheduled Change Requests (CHG), check CAB and approval statuses, see Normal vs. Standard changes, and filter by assignee or requester.</p>
-              <div class="sn-hub-card-actions">
-                <button class="sn-hub-card-btn">Open Change Management →</button>
+
+              <div class="sn-hub-card" id="sn-go-cases">
+                <div class="sn-hub-card-header">
+                  <h3>Case Management (CS & INC)</h3>
+                </div>
+                <p>Browse, filter, and review existing Customer Service (CS) and Incident (INC) tickets across assignment groups, states, and assigned team members.</p>
+                <div class="sn-hub-card-actions">
+                  <button class="sn-hub-card-btn">Open Case Management →</button>
+                </div>
+              </div>
+
+              <div class="sn-hub-card" id="sn-go-changes">
+                <div class="sn-hub-card-header">
+                  <h3>Change Management (CHG)</h3>
+                </div>
+                <p>Review scheduled Change Requests (CHG), check CAB and approval statuses, see Normal vs. Standard changes, and filter by assignee or requester.</p>
+                <div class="sn-hub-card-actions">
+                  <button class="sn-hub-card-btn">Open Change Management →</button>
+                </div>
               </div>
             </div>
           </div>
         </div>
+
+        <!-- FULL-HEIGHT RIGHT DOCKED SIDE PANEL (HIDDEN WHEN EMPTY) -->
+        <aside id="sn-upcoming-changes-widget" class="sn-upcoming-widget sn-hidden">
+          <div class="sn-upcoming-header">
+            <div class="sn-upcoming-title-row">
+              <h3 class="sn-upcoming-title">
+                <span>📋 Change Task Viewer</span>
+              </h3>
+              <span class="sn-hub-badge" id="sn-upcoming-count-badge" style="background: #2563eb;">0</span>
+            </div>
+            <span class="sn-upcoming-sub" id="sn-upcoming-user-label"></span>
+          </div>
+          <div class="sn-upcoming-list" id="sn-upcoming-changes-list"></div>
+        </aside>
       </div>
 
       <!-- 2. NEW TICKET QUEUE VIEW -->
@@ -644,7 +804,7 @@
           </div>
 
           <div class="sn-preview-section">
-            <span class="sn-preview-section-title">Full Description / Notes</span>
+            <span class="sn-preview-section-title">Full Description</span>
             <div class="sn-preview-desc-box" id="sn-modal-desc">Loading description...</div>
           </div>
         </div>
@@ -736,6 +896,18 @@
       e.stopPropagation();
       dropContent.classList.toggle('show');
     });
+
+	const searchInput = document.getElementById('sn-hub-search-input');
+    const searchBtn = document.getElementById('sn-hub-search-btn');
+    if (searchBtn && searchInput) {
+      searchBtn.addEventListener('click', () => searchTicketByNumber(searchInput.value));
+      searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          searchTicketByNumber(searchInput.value);
+        }
+      });
+    }
 
     const chgDropBtn = document.getElementById('sn-chg-approval-drop-btn');
     const chgDropContent = document.getElementById('sn-chg-approval-drop-content');
@@ -881,7 +1053,7 @@
         if (r.status === 401 || r.status === 403) {
           if (statusText) statusText.innerText = 'Session expired or unauthorized. Please log in or refresh the page.';
           if (newqStatusText) newqStatusText.innerText = 'Session expired. Waiting for login...';
-          return; // Exit cleanly without throwing an error
+          return;
         }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
       }
@@ -1179,6 +1351,7 @@
     const statusText = document.getElementById('sn-chg-status-text');
     if (!token) return;
 
+    const currentUserId = await resolveCurrentUserId();
     const fields = 'sys_id,number,priority,state,short_description,assignment_group,assigned_to,opened_at,approval,type,start_date,end_date,requested_by';
     const headers = { 'Accept': 'application/json', 'X-UserToken': token };
 
@@ -1186,20 +1359,26 @@
       if (statusText) statusText.innerText = 'Refreshing change requests...';
 
       const globalQuery = 'active=true^ORDERBYDESCsys_created_on';
-      const globalUrl = `/api/now/table/change_request?sysparm_query=${encodeURIComponent(globalQuery)}&sysparm_limit=200&sysparm_display_value=true&sysparm_fields=${fields}`;
+      const globalUrl = `/api/now/table/change_request?sysparm_query=${encodeURIComponent(globalQuery)}&sysparm_limit=200&sysparm_display_value=all&sysparm_fields=${fields}`;
 
       const requests = [fetch(globalUrl, { headers })];
       if (chgSelectedGroup !== 'ALL') {
         const groupQuery = `active=true^assignment_group.name=${chgSelectedGroup}^ORDERBYDESCsys_created_on`;
-        const groupUrl = `/api/now/table/change_request?sysparm_query=${encodeURIComponent(groupQuery)}&sysparm_limit=200&sysparm_display_value=true&sysparm_fields=${fields}`;
+        const groupUrl = `/api/now/table/change_request?sysparm_query=${encodeURIComponent(groupQuery)}&sysparm_limit=200&sysparm_display_value=all&sysparm_fields=${fields}`;
         requests.push(fetch(groupUrl, { headers }));
+      }
+
+      if (currentUserId) {
+        const myChgQuery = `active=true^assigned_to=${currentUserId}^ORDERBYstart_date`;
+        const myChgUrl = `/api/now/table/change_request?sysparm_query=${encodeURIComponent(myChgQuery)}&sysparm_limit=50&sysparm_display_value=all&sysparm_fields=${fields}`;
+        requests.push(fetch(myChgUrl, { headers }));
       }
 
       const responses = await Promise.all(requests);
       for (const r of responses) {
         if (r.status === 401 || r.status === 403) {
           if (statusText) statusText.innerText = 'Session expired or unauthorized. Please log in or refresh the page.';
-          return; // Exit cleanly without throwing an error
+          return;
         }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
       }
@@ -1208,17 +1387,191 @@
       const chgMap = new Map();
       jsonPayloads.forEach((payload) => {
         (payload.result || []).forEach((c) => {
-          chgMap.set(c.number, c);
+          const num = getVal(c.number);
+          if (num) chgMap.set(num, c);
         });
       });
 
       allChanges = Array.from(chgMap.values());
       updateChangeDropdowns();
       applyChangeFiltersAndRender();
+      renderUpcomingUserChanges();
     } catch (err) {
       console.warn('SN Helper Change Fetch Warning:', err.message);
       if (statusText) statusText.innerText = `Connection issue (${err.message}).`;
     }
+  }
+
+  function renderUpcomingUserChanges() {
+    const hubWrapper = document.getElementById('sn-hub-wrapper');
+    const widget = document.getElementById('sn-upcoming-changes-widget');
+    const listEl = document.getElementById('sn-upcoming-changes-list');
+    const badgeEl = document.getElementById('sn-upcoming-count-badge');
+    const userLabelEl = document.getElementById('sn-upcoming-user-label');
+    if (!widget || !listEl) return;
+
+    const myId = getCurrentUserId();
+    const myName = (getCurrentUserName() || '').toLowerCase().trim();
+
+    if (!myId && !myName) {
+      widget.classList.add('sn-hidden');
+      if (hubWrapper) hubWrapper.classList.remove('sn-has-side-panel');
+      return;
+    }
+
+    const now = new Date();
+
+    // Filter changes assigned to the current user
+    // Automatically remove once they reach Review, Closed, Completed, or Cancelled state
+    const userChanges = allChanges.filter((c) => {
+      const assignedSysId = getRawVal(c.assigned_to);
+      const assignedName = getVal(c.assigned_to).toLowerCase().trim();
+
+      const isMine =
+        (myId && assignedSysId === myId) ||
+        (myName && assignedName && assignedName === myName);
+
+      if (!isMine) return false;
+
+      const stateText = getVal(c.state).toLowerCase().trim();
+      if (
+        stateText.includes('review') ||
+        stateText.includes('closed') ||
+        stateText.includes('cancel') ||
+        stateText.includes('complete')
+      ) {
+        return false;
+      }
+
+      return true;
+    });
+
+    // Check window transitions (Start / End) & trigger notifications
+    userChanges.forEach((c) => {
+      const number = getVal(c.number);
+      const startDisp = getVal(c.start_date);
+      const endDisp = getVal(c.end_date);
+      const startDateObj = parseSNDate(startDisp) || parseSNDate(getRawVal(c.start_date));
+      const endDateObj = parseSNDate(endDisp) || parseSNDate(getRawVal(c.end_date));
+
+      const isPastEnd = endDateObj && now.getTime() > endDateObj.getTime();
+      const isInWindow =
+        startDateObj &&
+        now.getTime() >= startDateObj.getTime() &&
+        (!endDateObj || now.getTime() <= endDateObj.getTime());
+
+      if (isFirstChangeLoad) {
+        // Seed existing states on first load so we don't spam alerts on page refresh
+        if (isInWindow || isPastEnd) notifiedChangeStart.add(number);
+        if (isPastEnd) notifiedChangeEnd.add(number);
+      } else {
+        if (isInWindow && !notifiedChangeStart.has(number)) {
+          notifiedChangeStart.add(number);
+          sendChangeWindowNotification(c, 'START');
+        }
+        if (isPastEnd && !notifiedChangeEnd.has(number)) {
+          notifiedChangeEnd.add(number);
+          notifiedChangeStart.add(number);
+          sendChangeWindowNotification(c, 'END');
+        }
+      }
+    });
+
+    if (isFirstChangeLoad) {
+      isFirstChangeLoad = false;
+    }
+    saveNotifiedChangeSets();
+
+    // Sort priority: 1) Active Window / Overdue Review Needed -> 2) Upcoming chronological -> 3) Unscheduled
+    userChanges.sort((a, b) => {
+      const dA = parseSNDate(getVal(a.start_date)) || parseSNDate(getRawVal(a.start_date));
+      const dB = parseSNDate(getVal(b.start_date)) || parseSNDate(getRawVal(b.start_date));
+      if (dA && dB) return dA.getTime() - dB.getTime();
+      if (dA) return -1;
+      if (dB) return 1;
+      return getVal(a.number).localeCompare(getVal(b.number));
+    });
+
+    myUpcomingChanges = userChanges;
+
+    // Hide the side panel and re-center the Hub when empty
+    if (myUpcomingChanges.length === 0) {
+      widget.classList.add('sn-hidden');
+      if (hubWrapper) hubWrapper.classList.remove('sn-has-side-panel');
+      return;
+    }
+
+    // Show side panel and shift Hub layout to make room
+    widget.classList.remove('sn-hidden');
+    if (hubWrapper) hubWrapper.classList.add('sn-has-side-panel');
+
+    if (badgeEl) badgeEl.innerText = `${myUpcomingChanges.length} Active`;
+    if (userLabelEl) {
+      const displayUser = getCurrentUserName() || getVal(myUpcomingChanges[0].assigned_to) || 'Current User';
+      userLabelEl.innerText = `Assigned to ${displayUser} • Auto-clears at Review stage`;
+    }
+
+    listEl.innerHTML = myUpcomingChanges
+      .map((c) => {
+        const sysId = getRawVal(c.sys_id) || getVal(c.sys_id);
+        const number = getVal(c.number);
+        const shortDesc = getVal(c.short_description) || 'No description provided';
+        const stateVal = getVal(c.state) || '—';
+        const approvalVal = getVal(c.approval) || '—';
+        const stateClass = getStateBadgeClass(stateVal);
+
+        const startDisp = getVal(c.start_date);
+        const endDisp = getVal(c.end_date);
+        const startDateObj = parseSNDate(startDisp) || parseSNDate(getRawVal(c.start_date));
+        const endDateObj = parseSNDate(endDisp) || parseSNDate(getRawVal(c.end_date));
+
+        const isPastEnd = endDateObj && now.getTime() > endDateObj.getTime();
+        const isActiveNow =
+          !isPastEnd &&
+          startDateObj &&
+          now.getTime() >= startDateObj.getTime() &&
+          (!endDateObj || now.getTime() <= endDateObj.getTime());
+
+        let itemStateClass = '';
+        let statusPillHtml = '<span class="sn-chg-status-pill sn-pill-upcoming">Upcoming</span>';
+        let actionBannerHtml = '';
+
+        if (isPastEnd) {
+          itemStateClass = 'sn-chg-review-needed';
+          statusPillHtml = '<span class="sn-chg-status-pill sn-pill-overdue">⚠️ Review / Close</span>';
+          actionBannerHtml = `<div class="sn-upcoming-action-banner">Window ended while in <strong>${stateVal}</strong>. Move to Review to clear.</div>`;
+        } else if (isActiveNow) {
+          itemStateClass = 'sn-chg-active-now';
+          statusPillHtml = '<span class="sn-chg-status-pill sn-pill-active">🟢 Window Active</span>';
+        }
+
+        const scheduleText = startDisp
+          ? `<div><strong>Start:</strong> ${startDisp}</div>${endDisp ? `<div><strong>End:</strong> ${endDisp}</div>` : ''}`
+          : '<div><em>No scheduled start date set</em></div>';
+
+        return `
+          <div class="sn-upcoming-item ${itemStateClass}" data-sysid="${sysId}" title="Click to preview ${number}">
+            <div class="sn-upcoming-item-top">
+              <span class="sn-upcoming-number">
+                ${number}
+                ${statusPillHtml}
+              </span>
+              <span class="sn-state-badge ${stateClass}" style="font-size: 10.5px; padding: 2px 7px;">${stateVal} • ${approvalVal}</span>
+            </div>
+            <div class="sn-upcoming-desc">${shortDesc}</div>
+            ${actionBannerHtml}
+            <div class="sn-upcoming-time">${scheduleText}</div>
+          </div>
+        `;
+      })
+      .join('');
+
+    listEl.querySelectorAll('.sn-upcoming-item').forEach((card) => {
+      card.addEventListener('click', () => {
+        const sysId = card.getAttribute('data-sysid');
+        if (sysId) openTicketPreview(sysId, 'CHG');
+      });
+    });
   }
 
   function updateChangeDropdowns() {
@@ -1233,7 +1586,7 @@
     });
 
     allChanges.forEach((c) => {
-      const gName = c.assignment_group?.display_value || 'Unassigned Group';
+      const gName = getVal(c.assignment_group) || 'Unassigned Group';
       uniqueGroups.add(gName);
       const appVal = getVal(c.approval) || 'Not Yet Requested';
       uniqueApprovals.add(appVal);
@@ -1310,7 +1663,7 @@
     const statusText = document.getElementById('sn-chg-status-text');
 
     let filtered = allChanges.filter((c) => {
-      const gName = c.assignment_group?.display_value || 'Unassigned Group';
+      const gName = getVal(c.assignment_group) || 'Unassigned Group';
       return chgSelectedGroup === 'ALL' || gName === chgSelectedGroup;
     });
 
@@ -1384,10 +1737,13 @@
 
     tbody.innerHTML = changes
       .map((c) => {
+        const sysId = getRawVal(c.sys_id) || getVal(c.sys_id);
+        const number = getVal(c.number);
+        const shortDesc = getVal(c.short_description);
         const rawUser = getVal(c.assigned_to);
         const assignedToHtml = rawUser 
           ? rawUser 
-          : `<span class="sn-unassigned-pill">Unassigned</span> <button class="sn-assign-btn" data-sysid="${c.sys_id}">Assign to me</button>`;
+          : `<span class="sn-unassigned-pill">Unassigned</span> <button class="sn-assign-btn" data-sysid="${sysId}">Assign to me</button>`;
 
         const requestedByName = getVal(c.requested_by) || '—';
         const chgType = getVal(c.type) || '—';
@@ -1404,11 +1760,11 @@
 
         return `
           <tr>
-            <td><span class="sn-type-badge">CHG</span><a class="sn-link" href="#" data-sysid="${c.sys_id}">${c.number}</a></td>
+            <td><span class="sn-type-badge">CHG</span><a class="sn-link" href="#" data-sysid="${sysId}">${number}</a></td>
             <td><span class="sn-badge">${chgType}</span></td>
             <td><span class="sn-state-badge ${approvalClass}">${approvalVal}</span></td>
             <td><span class="sn-state-badge ${stateClass}">${stateVal}</span></td>
-            <td>${c.short_description || ''}</td>
+            <td>${shortDesc}</td>
             <td>${scheduleHtml}</td>
             <td>${assignedToHtml}</td>
             <td>${requestedByName}</td>
@@ -1433,7 +1789,62 @@
     });
   }
 
-  async function openTicketPreview(sysId, forcedType) {
+  async function searchTicketByNumber(rawQuery) {
+    const query = (rawQuery || '').trim().toUpperCase();
+    const msgEl = document.getElementById('sn-hub-search-msg');
+    const btnEl = document.getElementById('sn-hub-search-btn');
+
+    if (!query) {
+      if (msgEl) msgEl.innerText = 'Please enter a ticket number to search.';
+      return;
+    }
+
+    const token = getAuthToken();
+    if (!token) {
+      if (msgEl) msgEl.innerText = 'Session token missing. Please refresh the page.';
+      return;
+    }
+
+    if (msgEl) msgEl.innerText = '';
+    if (btnEl) {
+      btnEl.disabled = true;
+      btnEl.innerText = 'Searching...';
+    }
+
+    try {
+      const headers = { 'Accept': 'application/json', 'X-UserToken': token };
+      // Search base task table so CS, INC, CHG, PRB, etc. are all found (even if closed)
+      const url = `/api/now/table/task?sysparm_query=${encodeURIComponent(`number=${query}`)}&sysparm_limit=1&sysparm_display_value=all&sysparm_fields=sys_id,number,sys_class_name`;
+      const res = await fetch(url, { headers });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const results = (await res.json()).result || [];
+
+      if (results.length === 0) {
+        if (msgEl) msgEl.innerText = `No ticket found matching "${query}".`;
+        return;
+      }
+
+      const record = results[0];
+      const sysId = getRawVal(record.sys_id) || getVal(record.sys_id);
+      const number = getVal(record.number) || query;
+      const className = getRawVal(record.sys_class_name);
+      const prefix = getTicketPrefix(number);
+
+      const forcedType = prefix === 'CHG' ? 'CHG' : prefix;
+      openTicketPreview(sysId, forcedType, className);
+    } catch (err) {
+      console.warn('SN Helper Ticket Search Warning:', err);
+      if (msgEl) msgEl.innerText = `Search failed (${err.message}).`;
+    } finally {
+      if (btnEl) {
+        btnEl.disabled = false;
+        btnEl.innerText = 'Search Ticket';
+      }
+    }
+  }
+
+  async function openTicketPreview(sysId, forcedType, explicitTable) {
     const token = getAuthToken();
     if (!token) return;
 
@@ -1552,55 +1963,109 @@
         };
 
       } else {
-        const res = await fetch(`/api/now/table/task/${sysId}?sysparm_display_value=true&sysparm_fields=sys_id,number,priority,state,short_description,description,assignment_group,assigned_to,opened_at`, {
-          headers
-        });
-        
-        if (!res.ok) throw new Error('Failed to load ticket details.');
-        const data = (await res.json()).result;
-        const prefix = getTicketPrefix(data.number);
+        // Resolve the specific child table (sn_customerservice_case or incident) so Account, Caller/Contact, and Service fields are returned
+        let targetTable = explicitTable;
+        if (!targetTable) {
+          const cachedTicket = allTickets.find(t => (getRawVal(t.sys_id) || getVal(t.sys_id)) === sysId);
+          if (cachedTicket) {
+            const rawClass = getRawVal(cachedTicket.sys_class_name);
+            if (rawClass && !rawClass.includes(' ')) targetTable = rawClass;
+            else {
+              const pref = getTicketPrefix(getVal(cachedTicket.number));
+              if (pref === 'CS') targetTable = 'sn_customerservice_case';
+              else if (pref === 'INC') targetTable = 'incident';
+            }
+          }
+        }
+        if (!targetTable) targetTable = 'task';
 
-        document.getElementById('sn-modal-number').innerText = data.number;
+        let res = await fetch(`/api/now/table/${targetTable}/${sysId}?sysparm_display_value=true`, { headers });
+
+        // Fallback to base task table if custom table ACL or table name differs
+        if (!res.ok && targetTable !== 'task') {
+          res = await fetch(`/api/now/table/task/${sysId}?sysparm_display_value=true`, { headers });
+        }
+        if (!res.ok) throw new Error('Failed to load ticket details.');
+
+        let data = (await res.json()).result;
+        const prefix = getTicketPrefix(getVal(data.number));
+
+        // If we initially hit 'task', do a quick follow-up fetch on the child table so Account & Caller/Contact populate
+        if (targetTable === 'task' && (prefix === 'CS' || prefix === 'INC')) {
+          const childTable = prefix === 'CS' ? 'sn_customerservice_case' : 'incident';
+          const childRes = await fetch(`/api/now/table/${childTable}/${sysId}?sysparm_display_value=true`, { headers });
+          if (childRes.ok) {
+            data = (await childRes.json()).result;
+            targetTable = childTable;
+          }
+        }
+
+        const number = getVal(data.number);
+        document.getElementById('sn-modal-number').innerText = number;
         document.getElementById('sn-modal-prefix').innerText = prefix;
-        document.getElementById('sn-modal-short-desc').innerText = data.short_description || 'No short description provided.';
-        document.getElementById('sn-modal-desc').innerText = data.description || 'No description provided for this task.';
+        document.getElementById('sn-modal-short-desc').innerText = getVal(data.short_description) || 'No short description provided.';
+        document.getElementById('sn-modal-desc').innerText = getVal(data.description) || 'No description provided for this task.';
+
+        const accountName = getFirstAvailable(data, ['account', 'company', 'u_account']) || '—';
+        const callerContact = getFirstAvailable(data, ['contact', 'caller_id', 'consumer', 'u_caller', 'opened_by']) || '—';
+        const parentService = getFirstAvailable(data, ['business_service', 'u_parent_service', 'product', 'u_product', 'parent']) || '—';
+        const childService = getFirstAvailable(data, ['service_offering', 'u_child_service', 'u_sub_service', 'cmdb_ci']) || '—';
+
+        const stateVal = getVal(data.state) || '—';
+        const prioVal = getVal(data.priority) || '—';
+        const groupName = getVal(data.assignment_group) || 'Unassigned Group';
+        const assignedTo = getVal(data.assigned_to) || 'Unassigned';
+        const openedAt = getVal(data.opened_at) || '—';
 
         metaGrid.innerHTML = `
           <div class="sn-preview-meta-item">
+            <span class="sn-preview-meta-label">Account</span>
+            <span class="sn-preview-meta-val">${accountName}</span>
+          </div>
+          <div class="sn-preview-meta-item">
+            <span class="sn-preview-meta-label">Caller / Contact</span>
+            <span class="sn-preview-meta-val">${callerContact}</span>
+          </div>
+          <div class="sn-preview-meta-item">
+            <span class="sn-preview-meta-label">Product (Parent / Child Service)</span>
+            <span class="sn-preview-meta-val">${parentService} / ${childService}</span>
+          </div>
+          <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">State / Priority</span>
-            <span class="sn-preview-meta-val">${data.state || '—'} (Priority: ${data.priority || '—'})</span>
+            <span class="sn-preview-meta-val">${stateVal} (Priority: ${prioVal})</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Assignment Group</span>
-            <span class="sn-preview-meta-val">${data.assignment_group?.display_value || 'Unassigned Group'}</span>
+            <span class="sn-preview-meta-val">${groupName}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Assigned To</span>
-            <span class="sn-preview-meta-val">${data.assigned_to?.display_value || 'Unassigned'}</span>
+            <span class="sn-preview-meta-val">${assignedTo}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Opened At</span>
-            <span class="sn-preview-meta-val">${data.opened_at || '—'}</span>
+            <span class="sn-preview-meta-val">${openedAt}</span>
           </div>
         `;
 
-        const rawAssigned = (data.assigned_to?.display_value || '').trim();
+        const rawAssigned = getVal(data.assigned_to);
         if (!rawAssigned) {
           assignBtn.style.display = 'block';
           assignBtn.innerText = 'Assign to me';
           assignBtn.onclick = async () => {
-            await assignToMe(data.sys_id, assignBtn);
-            openTicketPreview(sysId, 'CS');
+            await assignToMe(getRawVal(data.sys_id) || sysId, assignBtn);
+            openTicketPreview(sysId, prefix, targetTable);
           };
         }
 
-        const recordUrl = `/now/cwf/agent/record/task/${data.sys_id}`;
+        const recordTable = targetTable !== 'task' ? targetTable : (prefix === 'CS' ? 'sn_customerservice_case' : (prefix === 'INC' ? 'incident' : 'task'));
+        const recordUrl = `/now/cwf/agent/record/${recordTable}/${getRawVal(data.sys_id) || sysId}`;
         document.getElementById('sn-modal-native-link').onclick = () => {
           window.location.href = recordUrl;
         };
       }
     } catch (err) {
-      console.error(err);
+      console.warn('SN Helper Preview Warning:', err);
       document.getElementById('sn-modal-number').innerText = 'Error';
       document.getElementById('sn-modal-desc').innerText = `Could not load ticket details: ${err.message}`;
     }
@@ -1658,7 +2123,7 @@
     if (clean.includes('hold') || clean.includes('pending') || clean.includes('awaiting') || clean.includes('assess') || clean.includes('authorize') || clean.includes('scheduled')) {
       return 'state-on-hold';
     }
-    if (clean.includes('resolved') || clean.includes('closed') || clean.includes('completed')) {
+    if (clean.includes('resolved') || clean.includes('closed') || clean.includes('completed') || clean.includes('review')) {
       return 'state-resolved';
     }
     if (clean.includes('cancel') || clean.includes('reject')) {

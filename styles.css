@@ -886,3 +886,347 @@
 .sn-update-dismiss:hover {
   background: rgba(15, 23, 42, 0.25);
 }
+
+/* --- HUB FULL-HEIGHT DOCKED SIDE PANEL & CENTERED ALIGNMENT --- */
+#sn-view-hub {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  width: 100%;
+  height: 100%;
+  padding: 0 !important;
+  margin: 0 !important;
+  box-sizing: border-box;
+  overflow: hidden; /* Prevents any outer page scrollbar */
+}
+
+/* Automatically push #sn-view-hub down if the top update banner is visible */
+.sn-update-banner:not(.sn-hidden) ~ #sn-view-hub {
+  top: 49px;
+  height: calc(100% - 49px);
+}
+
+#sn-view-hub.sn-view-hidden {
+  display: none !important;
+}
+
+.sn-hub-main-area {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 32px;
+  box-sizing: border-box;
+  overflow-y: auto; /* Only scrolls if window is shrunk smaller than the 3 cards */
+  transition: all 0.25s ease;
+}
+
+.sn-hub-wrapper {
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+/* Fix off-center subtitle text above the 3 hub cards */
+.sn-hub-hero {
+  text-align: center !important;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 36px;
+}
+
+.sn-hub-hero h1 {
+  text-align: center;
+  margin: 0 0 12px 0;
+}
+
+.sn-hub-hero p {
+  text-align: center;
+  max-width: 680px;
+  margin: 0 auto !important;
+}
+
+/* Full-height right-docked side panel */
+.sn-upcoming-widget {
+  width: 390px;
+  flex-shrink: 0;
+  background: #141d2e;
+  border-left: 1px solid #334155;
+  box-shadow: -8px 0 28px rgba(0, 0, 0, 0.35);
+  height: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  z-index: 5;
+  overflow: hidden; /* Keeps header fixed while the list inside scrolls */
+}
+
+.sn-upcoming-widget.sn-hidden {
+  display: none !important;
+}
+
+.sn-upcoming-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 20px 20px 16px 20px;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+  border-top: 4px solid #3b82f6;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.sn-upcoming-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.sn-upcoming-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #f8fafc;
+  margin: 0;
+}
+
+.sn-upcoming-sub {
+  font-size: 12px;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.sn-upcoming-list {
+  flex: 1;
+  min-height: 0; /* Crucial for flex children to scroll properly without overflowing */
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  padding: 16px 20px 80px 20px; /* Extra bottom padding so the floating 'Hide Support Hub' button never covers the last card */
+  box-sizing: border-box;
+}
+
+.sn-upcoming-item {
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-left: 4px solid #3b82f6;
+  border-radius: 8px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.sn-upcoming-item:hover {
+  border-color: #60a5fa;
+  background: #131c31;
+  transform: translateY(-1px);
+}
+
+/* State 1: Active Change Window (Green) */
+.sn-upcoming-item.sn-chg-active-now {
+  border-color: #16a34a;
+  border-left: 4px solid #22c55e;
+  background: linear-gradient(145deg, rgba(22, 163, 74, 0.14), #0f172a 65%);
+}
+
+.sn-upcoming-item.sn-chg-active-now:hover {
+  border-color: #4ade80;
+}
+
+/* State 2: Window Ended / Needs Review or Closure (Amber/Orange) */
+.sn-upcoming-item.sn-chg-review-needed {
+  border-color: #d97706;
+  border-left: 4px solid #f59e0b;
+  background: linear-gradient(145deg, rgba(245, 158, 11, 0.15), #0f172a 65%);
+}
+
+.sn-upcoming-item.sn-chg-review-needed:hover {
+  border-color: #fbbf24;
+}
+
+.sn-upcoming-item-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sn-upcoming-number {
+  font-weight: 700;
+  color: #60a5fa;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sn-chg-status-pill {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.sn-pill-upcoming {
+  background: rgba(59, 130, 246, 0.2);
+  color: #93c5fd;
+  border: 1px solid rgba(59, 130, 246, 0.4);
+}
+
+.sn-pill-active {
+  background: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+  border: 1px solid rgba(34, 197, 94, 0.45);
+}
+
+.sn-pill-overdue {
+  background: rgba(245, 158, 11, 0.22);
+  color: #fde047;
+  border: 1px solid rgba(245, 158, 11, 0.5);
+}
+
+.sn-upcoming-desc {
+  font-size: 13px;
+  color: #e2e8f0;
+  font-weight: 500;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.sn-upcoming-action-banner {
+  font-size: 11px;
+  font-weight: 600;
+  color: #fef08a;
+  background: rgba(161, 98, 7, 0.35);
+  border: 1px solid rgba(234, 179, 8, 0.4);
+  padding: 5px 8px;
+  border-radius: 5px;
+  margin-top: 2px;
+}
+
+.sn-upcoming-time {
+  font-size: 11.5px;
+  color: #94a3b8;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.sn-upcoming-time strong {
+  color: #cbd5e1;
+}
+
+@media (max-width: 1100px) {
+  #sn-view-hub {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .sn-hub-main-area {
+    height: auto;
+    overflow-y: visible;
+  }
+  .sn-upcoming-widget {
+    width: 100%;
+    height: auto;
+    max-height: 450px;
+    border-left: none;
+    border-top: 1px solid #334155;
+  }
+}
+
+/* --- HUB TICKET SEARCH BAR --- */
+.sn-hub-search-wrap {
+  margin-top: 22px;
+  width: 100%;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.sn-hub-search-box {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  background: #0f172a;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid #334155;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  transition: border-color 0.15s ease;
+}
+
+.sn-hub-search-box:focus-within {
+  border-color: #3b82f6;
+}
+
+.sn-hub-search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #f8fafc;
+  font-size: 14px;
+  padding: 8px 12px;
+  outline: none;
+}
+
+.sn-hub-search-input::placeholder {
+  color: #64748b;
+}
+
+.sn-hub-search-btn {
+  background: #2563eb;
+  color: #ffffff;
+  border: none;
+  border-radius: 7px;
+  padding: 8px 18px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  white-space: nowrap;
+}
+
+.sn-hub-search-btn:hover {
+  background: #1d4ed8;
+}
+
+.sn-hub-search-btn:disabled {
+  background: #334155;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.sn-hub-search-msg {
+  font-size: 12px;
+  font-weight: 500;
+  min-height: 16px;
+  color: #f87171;
+}
