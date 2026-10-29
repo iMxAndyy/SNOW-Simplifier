@@ -2,7 +2,7 @@
   if (window.top !== window.self) return;
 
   // Version & GitHub Auto-Check Config
-  const FALLBACK_VERSION = '1.0.3';
+  const FALLBACK_VERSION = '1.0.4';
   const GITHUB_API_MANIFEST_URL = 'https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/manifest.json?ref=main';
   const GITHUB_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
 
@@ -17,7 +17,6 @@
   let allTickets = [];
   let unassignedQueueCS = [];
   let userMemberGroups = [];
-  let knownGlobalUnassignedCS = new Set();
   let knownGlobalUnassignedCS = new Set();
   let isFirstLoad = true;
   let notificationGroup = localStorage.getItem('sn_helper_notif_group') || DEFAULT_GROUP;
@@ -46,6 +45,12 @@
   // --- CURRENT USER IDENTITY ---
   let cachedUserId = localStorage.getItem('sn_helper_user_sys_id') || null;
   let cachedUserName = localStorage.getItem('sn_helper_user_full_name') || null;
+  
+  // --- PERSONAL LINKS STATE (SAVED PER USER IN LOCALSTORAGE) ---
+  let userLinks = JSON.parse(localStorage.getItem('sn_helper_user_links') || '[]');
+  let selectedLinkCategory = 'ALL';
+  let linkSearchQuery = '';
+  let editingLinkId = null;
 
   function saveNotifiedChangeSets() {
     try {
@@ -493,12 +498,19 @@
       hub: document.getElementById('sn-view-hub'),
       new_queue: document.getElementById('sn-view-new-queue'),
       cases: document.getElementById('sn-view-cases'),
-      changes: document.getElementById('sn-view-changes')
+      changes: document.getElementById('sn-view-changes'),
+      links: document.getElementById('sn-view-links'),
+      notes: document.getElementById('sn-view-notes'),
+      todos: document.getElementById('sn-view-todos')
     };
 
     Object.keys(views).forEach(k => {
       if (views[k]) views[k].classList.toggle('sn-view-hidden', k !== currentView);
     });
+
+    if (targetView === 'links') {
+      renderUserLinks();
+    }
   }
 
   function buildUI() {
@@ -582,6 +594,32 @@
                 <div class="sn-hub-card-actions">
                   <button class="sn-hub-card-btn">Open Change Management →</button>
                 </div>
+              </div>
+            </div>
+			<div class="sn-hub-section-divider">Personal Workspace & Tools (Saved Locally)</div>
+            <div class="sn-hub-tools-grid">
+              <div class="sn-hub-tool-card" id="sn-go-links">
+                <div class="sn-hub-tool-top">
+                  <h4 class="sn-hub-tool-title">🔗 Quick Links & Tools</h4>
+                  <span class="sn-hub-badge" id="sn-hub-links-count" style="background: #334155;">0 Saved</span>
+                </div>
+                <p class="sn-hub-tool-desc">Save your personal bookmarks, internal dashboards, documentation, and local file/script paths with custom notes.</p>
+              </div>
+
+              <div class="sn-hub-tool-card sn-placeholder-card" id="sn-go-notes">
+                <div class="sn-hub-tool-top">
+                  <h4 class="sn-hub-tool-title">📝 Personal Notes</h4>
+                  <span class="sn-hub-badge" style="background: #1e293b; color: #94a3b8; border: 1px solid #334155;">Coming Soon</span>
+                </div>
+                <p class="sn-hub-tool-desc">Scratchpad for quick troubleshooting snippets, standard responses, and shift handover notes.</p>
+              </div>
+
+              <div class="sn-hub-tool-card sn-placeholder-card" id="sn-go-todos">
+                <div class="sn-hub-tool-top">
+                  <h4 class="sn-hub-tool-title">✅ To-Do List</h4>
+                  <span class="sn-hub-badge" style="background: #1e293b; color: #94a3b8; border: 1px solid #334155;">Coming Soon</span>
+                </div>
+                <p class="sn-hub-tool-desc">Track your personal daily tasks, follow-ups, and reminders alongside your ServiceNow queues.</p>
               </div>
             </div>
           </div>
@@ -781,6 +819,101 @@
           </tbody>
         </table>
       </div>
+	  <!-- 5. PERSONAL LINKS VIEW -->
+      <div id="sn-view-links" class="sn-view-section sn-view-hidden">
+        <div class="sn-header">
+          <div class="sn-title-area">
+            <div class="sn-title-row">
+              <button class="sn-back-hub-btn" id="sn-links-back-btn">← Support Hub</button>
+              <h1>Quick Links & Tools</h1>
+            </div>
+            <div class="sn-status-bar">Saved privately in your browser • Supports web URLs and local/network paths</div>
+          </div>
+        </div>
+
+        <div class="sn-links-container">
+          <!-- Top Action Bar (Add Button + Export/Import) -->
+          <div class="sn-links-top-actions">
+            <button class="sn-btn sn-btn-primary" id="sn-toggle-form-btn">➕ Add New Link or Tool</button>
+            <div style="display: flex; gap: 8px;">
+              <button class="sn-btn" id="sn-links-export-btn" style="background: #334155; font-size: 12px;">⬇ Export JSON</button>
+              <button class="sn-btn" id="sn-links-import-btn" style="background: #334155; font-size: 12px;">⬆ Import JSON</button>
+              <input type="file" id="sn-links-import-input" accept=".json" style="display: none;" />
+            </div>
+          </div>
+
+          <!-- Collapsible Add/Edit Form Card (Hidden by default) -->
+          <div class="sn-links-form-card sn-hidden" id="sn-links-form-card">
+            <div class="sn-links-form-title">
+              <span id="sn-links-form-heading">➕ Add New Link or Tool</span>
+              <button id="sn-links-cancel-edit" class="sn-link-icon-btn" style="display: none;">Cancel Edit</button>
+            </div>
+            <div class="sn-links-form-grid">
+              <input type="text" id="sn-link-name" class="sn-links-input" placeholder="Tool / Site Name (e.g., Darwin Web Portal) *" />
+              <input type="text" id="sn-link-url" class="sn-links-input" placeholder="Primary / Prod URL or Local Path *" />
+              <input type="text" id="sn-link-category" class="sn-links-input" placeholder="Category (e.g., Monitoring, Admin, Docs)" list="sn-link-cat-suggestions" />
+              <datalist id="sn-link-cat-suggestions"></datalist>
+              <datalist id="sn-env-label-suggestions"></datalist>
+            </div>
+
+            <div class="sn-alt-urls-section">
+              <div class="sn-alt-urls-header">
+                <span class="sn-alt-urls-label">🌐 Additional Environments / Sub-Paths (Optional — e.g., UAT, Sub-folder)</span>
+                <button type="button" id="sn-add-alt-url-btn" class="sn-add-env-btn">+ Add Environment URL</button>
+              </div>
+              <div id="sn-alt-urls-rows" class="sn-alt-urls-rows"></div>
+            </div>
+
+            <div class="sn-links-form-bottom">
+              <input type="text" id="sn-link-note" class="sn-links-input" placeholder="Optional note or instructions (e.g., Use domain credentials, VPN required...)" />
+              <button class="sn-btn sn-btn-primary" id="sn-link-save-btn" style="white-space: nowrap; padding: 9px 20px;">Save Link</button>
+            </div>
+          </div>
+
+          <!-- Toolbar (Categories & Search) -->
+          <div class="sn-links-toolbar">
+            <div class="sn-links-categories" id="sn-links-categories-bar"></div>
+            <input type="text" id="sn-links-search" class="sn-links-input" style="max-width: 280px;" placeholder="🔍 Filter links by name or note..." />
+          </div>
+
+          <!-- Dynamic Multi-Column Grid -->
+          <div class="sn-links-grid" id="sn-links-grid"></div>
+        </div>
+      </div>
+
+      <!-- 6. PLACEHOLDER: PERSONAL NOTES VIEW -->
+      <div id="sn-view-notes" class="sn-view-section sn-view-hidden">
+        <div class="sn-header">
+          <div class="sn-title-area">
+            <div class="sn-title-row">
+              <button class="sn-back-hub-btn" id="sn-notes-back-btn">← Support Hub</button>
+              <h1>Personal Notes</h1>
+            </div>
+            <div class="sn-status-bar">Personal scratchpad & templates</div>
+          </div>
+        </div>
+        <div style="text-align: center; padding: 60px 20px; color: #94a3b8;">
+          <h2 style="color: #f8fafc; margin-bottom: 8px;">📝 Personal Notes — Coming Soon</h2>
+          <p>This space will hold your locally saved notes, command snippets, and ticket templates.</p>
+        </div>
+      </div>
+
+      <!-- 7. PLACEHOLDER: TO-DO LIST VIEW -->
+      <div id="sn-view-todos" class="sn-view-section sn-view-hidden">
+        <div class="sn-header">
+          <div class="sn-title-area">
+            <div class="sn-title-row">
+              <button class="sn-back-hub-btn" id="sn-todos-back-btn">← Support Hub</button>
+              <h1>Personal To-Do List</h1>
+            </div>
+            <div class="sn-status-bar">Personal task & follow-up tracker</div>
+          </div>
+        </div>
+        <div style="text-align: center; padding: 60px 20px; color: #94a3b8;">
+          <h2 style="color: #f8fafc; margin-bottom: 8px;">✅ To-Do List — Coming Soon</h2>
+          <p>This space will let you manage personal action items and reminders saved directly in your browser.</p>
+        </div>
+      </div>
     `;
     document.body.appendChild(overlay);
 
@@ -850,7 +983,16 @@
     document.getElementById('sn-go-new-queue').addEventListener('click', () => switchView('new_queue'));
     document.getElementById('sn-go-cases').addEventListener('click', () => switchView('cases'));
     document.getElementById('sn-go-changes').addEventListener('click', () => switchView('changes'));
+	document.getElementById('sn-go-links').addEventListener('click', () => switchView('links'));
+    document.getElementById('sn-go-notes').addEventListener('click', () => switchView('notes'));
+    document.getElementById('sn-go-todos').addEventListener('click', () => switchView('todos'));
 
+    document.getElementById('sn-links-back-btn').addEventListener('click', () => switchView('hub'));
+    document.getElementById('sn-notes-back-btn').addEventListener('click', () => switchView('hub'));
+    document.getElementById('sn-todos-back-btn').addEventListener('click', () => switchView('hub'));
+
+    initLinksManagerEvents();
+    renderUserLinks();
     document.getElementById('sn-newq-back-btn').addEventListener('click', () => switchView('hub'));
     document.getElementById('sn-case-back-btn').addEventListener('click', () => switchView('hub'));
     document.getElementById('sn-chg-back-btn').addEventListener('click', () => switchView('hub'));
@@ -2058,7 +2200,8 @@
           };
         }
 
-        const recordTable = targetTable !== 'task' ? targetTable : (prefix === 'CS' ? 'sn_customerservice_case' : (prefix === 'INC' ? 'incident' : 'task'));
+        // Workspace workspace routes expect 'task' for CS and INC records to resolve properly
+        const recordTable = (prefix === 'CS' || prefix === 'INC') ? 'task' : (targetTable || 'task');
         const recordUrl = `/now/cwf/agent/record/${recordTable}/${getRawVal(data.sys_id) || sysId}`;
         document.getElementById('sn-modal-native-link').onclick = () => {
           window.location.href = recordUrl;
@@ -2105,6 +2248,532 @@
       btnElement.innerText = 'Assign to me';
       btnElement.disabled = false;
     }
+  }
+
+  function saveUserLinksToStorage() {
+    localStorage.setItem('sn_helper_user_links', JSON.stringify(userLinks));
+    const hubBadge = document.getElementById('sn-hub-links-count');
+    if (hubBadge) {
+      hubBadge.innerText = `${userLinks.length} Saved`;
+      hubBadge.style.background = userLinks.length > 0 ? '#2563eb' : '#334155';
+    }
+  }
+
+  function normalizeLinkUrl(rawInput) {
+    const trimmed = (rawInput || '').trim();
+    if (!trimmed) return { href: '#', isLocal: false, displayDomain: '' };
+
+    // Detect Windows drive path (e.g. C:\...) or network UNC path (\\server\...) or file://
+    const isWindowsDrive = /^[a-zA-Z]:[\\\/]/.test(trimmed);
+    const isUncPath = /^\\\\/.test(trimmed);
+    const isFileProtocol = /^file:\/\//i.test(trimmed);
+
+    if (isWindowsDrive || isUncPath || isFileProtocol) {
+      let fileUrl = trimmed;
+      if (isWindowsDrive) {
+        fileUrl = 'file:///' + trimmed.replace(/\\/g, '/');
+      } else if (isUncPath) {
+        fileUrl = 'file:' + trimmed.replace(/\\/g, '/');
+      }
+      return {
+        href: fileUrl,
+        rawPath: trimmed,
+        isLocal: true,
+        displayDomain: '📁 Local / Network Path'
+      };
+    }
+
+    // Standard web URL
+    let finalUrl = trimmed;
+    if (!/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(trimmed)) {
+      finalUrl = 'https://' + trimmed;
+    }
+
+    let domain = finalUrl;
+    try {
+      const u = new URL(finalUrl);
+      domain = u.hostname;
+    } catch (e) {}
+
+    return {
+      href: finalUrl,
+      rawPath: finalUrl,
+      isLocal: false,
+      displayDomain: `🌐 ${domain}`
+    };
+  }
+
+  function escapeHtml(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function getEnvBadgeClass(label) {
+    const clean = (label || '').toLowerCase();
+    if (clean.includes('uat') || clean.includes('test') || clean.includes('pre') || clean.includes('stag')) return 'sn-env-uat';
+    if (clean.includes('dev') || clean.includes('sandbox')) return 'sn-env-dev';
+    if (clean.includes('dr') || clean.includes('backup') || clean.includes('failover')) return 'sn-env-dr';
+    if (clean.includes('prod') || clean.includes('live')) return 'sn-env-prod';
+    return 'sn-env-other';
+  }
+
+  // Combine your default options with any custom ones the user has previously saved
+  const DEFAULT_LINK_CATEGORIES = ['Applications', 'Documentation', 'Local Tools', 'Admin Portals'];
+  const DEFAULT_ENV_LABELS = ['UAT', 'Pre-Prod', 'DEV', 'TEST', 'Staging', 'DR'];
+
+  function updateLinkAutocompleteLists() {
+    const catList = document.getElementById('sn-link-cat-suggestions');
+    const envList = document.getElementById('sn-env-label-suggestions');
+
+    const knownCategories = new Set(DEFAULT_LINK_CATEGORIES);
+    const knownEnvs = new Set(DEFAULT_ENV_LABELS);
+
+    userLinks.forEach(link => {
+      const cat = (link.category || '').trim();
+      if (cat) knownCategories.add(cat);
+
+      if (Array.isArray(link.altUrls)) {
+        link.altUrls.forEach(alt => {
+          const envLabel = (alt.label || '').trim();
+          if (envLabel) knownEnvs.add(envLabel);
+        });
+      }
+    });
+
+    if (catList) {
+      catList.innerHTML = Array.from(knownCategories)
+        .sort((a, b) => a.localeCompare(b))
+        .map(c => `<option value="${escapeHtml(c)}"></option>`)
+        .join('');
+    }
+
+    if (envList) {
+      envList.innerHTML = Array.from(knownEnvs)
+        .sort((a, b) => a.localeCompare(b))
+        .map(e => `<option value="${escapeHtml(e)}"></option>`)
+        .join('');
+    }
+  }
+
+  function addAltUrlRow(labelVal = '', urlVal = '') {
+    const container = document.getElementById('sn-alt-urls-rows');
+    if (!container) return;
+
+    // Refresh suggestions so any newly typed environments in other rows or saved links are included
+    updateLinkAutocompleteLists();
+
+    const row = document.createElement('div');
+    row.className = 'sn-alt-url-row';
+    row.innerHTML = `
+      <input type="text" class="sn-links-input sn-alt-env-label" placeholder="Env (click for list)" value="${escapeHtml(labelVal)}" list="sn-env-label-suggestions" autocomplete="off" />
+      <input type="text" class="sn-links-input sn-alt-env-url" placeholder="Environment URL or Local Path..." value="${escapeHtml(urlVal)}" />
+      <button type="button" class="sn-link-icon-btn danger sn-remove-alt-row" title="Remove environment" style="padding: 8px 10px;">&times;</button>
+    `;
+
+    row.querySelector('.sn-remove-alt-row').addEventListener('click', () => row.remove());
+    container.appendChild(row);
+  }
+
+  function initLinksManagerEvents() {
+    const saveBtn = document.getElementById('sn-link-save-btn');
+    const cancelEditBtn = document.getElementById('sn-links-cancel-edit');
+    const toggleFormBtn = document.getElementById('sn-toggle-form-btn');
+    const formCard = document.getElementById('sn-links-form-card');
+    const addEnvBtn = document.getElementById('sn-add-alt-url-btn');
+    const altRowsContainer = document.getElementById('sn-alt-urls-rows');
+    const searchInput = document.getElementById('sn-links-search');
+    const exportBtn = document.getElementById('sn-links-export-btn');
+    const importBtn = document.getElementById('sn-links-import-btn');
+    const importInput = document.getElementById('sn-links-import-input');
+
+    const nameInput = document.getElementById('sn-link-name');
+    const urlInput = document.getElementById('sn-link-url');
+    const catInput = document.getElementById('sn-link-category');
+    const noteInput = document.getElementById('sn-link-note');
+
+    if (toggleFormBtn && formCard) {
+      toggleFormBtn.addEventListener('click', () => {
+        const isHidden = formCard.classList.contains('sn-hidden');
+        if (isHidden) {
+          formCard.classList.remove('sn-hidden');
+          toggleFormBtn.innerText = '✕ Close Form';
+          if (nameInput) nameInput.focus();
+        } else {
+          formCard.classList.add('sn-hidden');
+          toggleFormBtn.innerText = '➕ Add New Link or Tool';
+        }
+      });
+    }
+
+    if (addEnvBtn) {
+      addEnvBtn.addEventListener('click', () => addAltUrlRow('', ''));
+    }
+
+    const resetForm = () => {
+      editingLinkId = null;
+      if (nameInput) nameInput.value = '';
+      if (urlInput) urlInput.value = '';
+      if (catInput) catInput.value = '';
+      if (noteInput) noteInput.value = '';
+      if (altRowsContainer) altRowsContainer.innerHTML = '';
+      if (formCard) formCard.classList.add('sn-hidden');
+      if (toggleFormBtn) toggleFormBtn.innerText = '➕ Add New Link or Tool';
+      const heading = document.getElementById('sn-links-form-heading');
+      if (heading) heading.innerText = '➕ Add New Link or Tool';
+      if (saveBtn) saveBtn.innerText = 'Save Link';
+      if (cancelEditBtn) cancelEditBtn.style.display = 'none';
+    };
+
+    const handleSave = () => {
+      const name = (nameInput?.value || '').trim();
+      const url = (urlInput?.value || '').trim();
+      const category = (catInput?.value || '').trim() || 'General';
+      const note = (noteInput?.value || '').trim();
+
+      if (!name || !url) {
+        alert('Please enter both a Name and a Primary URL / File Path.');
+        return;
+      }
+
+      const altUrls = [];
+      if (altRowsContainer) {
+        altRowsContainer.querySelectorAll('.sn-alt-url-row').forEach(row => {
+          const l = (row.querySelector('.sn-alt-env-label')?.value || '').trim() || 'ALT';
+          const u = (row.querySelector('.sn-alt-env-url')?.value || '').trim();
+          if (u) altUrls.push({ label: l, url: u });
+        });
+      }
+
+      if (editingLinkId) {
+        const idx = userLinks.findIndex(l => l.id === editingLinkId);
+        if (idx !== -1) {
+          userLinks[idx] = { ...userLinks[idx], name, url, category, note, altUrls };
+        }
+      } else {
+        userLinks.push({
+          id: 'lnk_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+          name,
+          url,
+          category,
+          note,
+          altUrls,
+          favourite: false,
+		  clickCount: 0,
+          createdAt: Date.now()
+        });
+      }
+
+      saveUserLinksToStorage();
+      resetForm();
+      renderUserLinks();
+    };
+
+    if (saveBtn) saveBtn.addEventListener('click', handleSave);
+    if (cancelEditBtn) cancelEditBtn.addEventListener('click', resetForm);
+
+    [nameInput, urlInput, catInput, noteInput].forEach(inp => {
+      if (inp) {
+        inp.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            handleSave();
+          }
+        });
+      }
+    });
+
+    if (searchInput) {
+      searchInput.addEventListener('input', (e) => {
+        linkSearchQuery = (e.target.value || '').toLowerCase().trim();
+        renderUserLinks();
+      });
+    }
+
+    if (exportBtn) {
+      exportBtn.addEventListener('click', () => {
+        const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(userLinks, null, 2));
+        const a = document.createElement('a');
+        a.setAttribute('href', dataStr);
+        a.setAttribute('download', `SupportHub_Links_${new Date().toISOString().slice(0, 10)}.json`);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      });
+    }
+
+    if (importBtn && importInput) {
+      importBtn.addEventListener('click', () => importInput.click());
+      importInput.addEventListener('change', (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const imported = JSON.parse(ev.target.result);
+            if (!Array.isArray(imported)) throw new Error('Invalid JSON format');
+            userLinks = imported;
+            saveUserLinksToStorage();
+            renderUserLinks();
+          } catch (err) {
+            alert('Could not import links JSON: ' + err.message);
+          }
+        };
+        reader.readAsText(file);
+        importInput.value = '';
+      });
+    }
+
+    // Expose open-form helper for Edit button triggers
+    window.snOpenLinkFormForEdit = (item) => {
+      if (formCard) formCard.classList.remove('sn-hidden');
+      if (toggleFormBtn) toggleFormBtn.innerText = '✕ Close Form';
+      editingLinkId = item.id;
+      if (nameInput) nameInput.value = item.name || '';
+      if (urlInput) urlInput.value = item.url || '';
+      if (catInput) catInput.value = item.category || '';
+      if (noteInput) noteInput.value = item.note || '';
+
+      if (altRowsContainer) {
+        altRowsContainer.innerHTML = '';
+        if (Array.isArray(item.altUrls)) {
+          item.altUrls.forEach(alt => addAltUrlRow(alt.label, alt.url));
+        }
+      }
+
+      const heading = document.getElementById('sn-links-form-heading');
+      if (heading) heading.innerText = `✏️ Editing: ${item.name}`;
+      if (saveBtn) saveBtn.innerText = 'Update Link';
+      if (cancelEditBtn) cancelEditBtn.style.display = 'inline-block';
+      if (nameInput) nameInput.focus();
+    };
+  }
+
+  function renderUserLinks() {
+    saveUserLinksToStorage();
+    updateLinkAutocompleteLists();
+    const grid = document.getElementById('sn-links-grid');
+    const catBar = document.getElementById('sn-links-categories-bar');
+    if (!grid || !catBar) return;
+
+    const categories = Array.from(new Set(userLinks.map(l => (l.category || 'General').trim()))).sort((a, b) => a.localeCompare(b));
+    if (selectedLinkCategory !== 'ALL' && !categories.includes(selectedLinkCategory)) {
+      selectedLinkCategory = 'ALL';
+    }
+
+    let catHtml = `<button class="sn-cat-pill ${selectedLinkCategory === 'ALL' ? 'active' : ''}" data-cat="ALL">All (${userLinks.length})</button>`;
+    categories.forEach(c => {
+      const count = userLinks.filter(l => (l.category || 'General').trim() === c).length;
+      catHtml += `<button class="sn-cat-pill ${selectedLinkCategory === c ? 'active' : ''}" data-cat="${escapeHtml(c)}">${escapeHtml(c)} (${count})</button>`;
+    });
+    catBar.innerHTML = catHtml;
+
+    catBar.querySelectorAll('.sn-cat-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        selectedLinkCategory = btn.getAttribute('data-cat');
+        renderUserLinks();
+      });
+    });
+
+    const filtered = userLinks.filter(l => {
+      const cat = (l.category || 'General').trim();
+      if (selectedLinkCategory !== 'ALL' && cat !== selectedLinkCategory) return false;
+      if (linkSearchQuery) {
+        const altText = Array.isArray(l.altUrls) ? l.altUrls.map(a => `${a.label} ${a.url}`).join(' ') : '';
+        const hay = `${l.name} ${l.note} ${l.url} ${cat} ${altText}`.toLowerCase();
+        return hay.includes(linkSearchQuery);
+      }
+      return true;
+    });
+
+    // SORTING: Favourites first, then newest/alphabetical
+    // SORTING: Favourites first, then highest click count (most used), then newest fallback
+    filtered.sort((a, b) => {
+      const favA = a.favourite ? 1 : 0;
+      const favB = b.favourite ? 1 : 0;
+      if (favA !== favB) return favB - favA; // Favourites to top
+
+      const countA = a.clickCount || 0;
+      const countB = b.clickCount || 0;
+      if (countA !== countB) return countB - countA; // Highest usage first
+
+      return (b.createdAt || 0) - (a.createdAt || 0); // Newest fallback
+    });
+
+    if (filtered.length === 0) {
+      grid.innerHTML = `
+        <div style="grid-column: 1 / -1; text-align: center; padding: 48px 20px; background: #1e293b; border: 1px dashed #334155; border-radius: 10px; color: #94a3b8;">
+          ${userLinks.length === 0
+            ? '<strong>No personal links saved yet.</strong><br>Use the form above to add your favourite tools, portals, documentation, or local file paths.'
+            : 'No links match your current filter.'}
+        </div>
+      `;
+      return;
+    }
+
+    grid.innerHTML = filtered.map(l => {
+      const info = normalizeLinkUrl(l.url);
+      const hasAlts = Array.isArray(l.altUrls) && l.altUrls.length > 0;
+      const isFav = !!l.favourite;
+      const noteHtml = l.note
+        ? `<p class="sn-link-note">${escapeHtml(l.note)}</p>`
+        : `<p class="sn-link-note" style="color: #64748b; font-style: italic;">No note added</p>`;
+
+      // Render alternate environment / sub-path badges if present
+      let altBadgesHtml = '';
+      if (hasAlts) {
+        const pills = l.altUrls.map(alt => {
+          const altInfo = normalizeLinkUrl(alt.url);
+          const badgeClass = getEnvBadgeClass(alt.label);
+          return `
+            <div class="sn-env-pill-group">
+              <a class="sn-env-launch ${badgeClass} sn-launch-link" href="${escapeHtml(altInfo.href)}" target="_blank" rel="noopener noreferrer" data-link-id="${l.id}" data-local="${altInfo.isLocal}" data-raw="${escapeHtml(altInfo.rawPath)}" title="Open ${escapeHtml(alt.label)}: ${escapeHtml(alt.url)}">
+                <span>${escapeHtml(alt.label)}</span>
+                <span>↗</span>
+              </a>
+              <button type="button" class="sn-env-copy sn-copy-link-btn" data-raw="${escapeHtml(altInfo.rawPath)}" title="Copy ${escapeHtml(alt.label)} URL/Path">📋</button>
+            </div>
+          `;
+        }).join('');
+        altBadgesHtml = `<div class="sn-env-badges-wrap">${pills}</div>`;
+      }
+
+      return `
+        <div class="sn-link-card ${info.isLocal ? 'sn-local-file-card' : ''} ${isFav ? 'sn-is-favourite' : ''}">
+          <div>
+            <div class="sn-link-card-top">
+              <div style="display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1;">
+                <button type="button" class="sn-fav-btn ${isFav ? 'is-active' : ''} sn-toggle-fav-btn" data-id="${l.id}" title="${isFav ? 'Unpin from top' : 'Pin to top'}">⭐</button>
+                <a class="sn-link-title-anchor sn-launch-link" href="${escapeHtml(info.href)}" target="_blank" rel="noopener noreferrer" data-link-id="${l.id}" data-id="${l.id}" data-local="${info.isLocal}" data-raw="${escapeHtml(info.rawPath)}" title="${escapeHtml(l.url)}" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  <span>${escapeHtml(l.name)}</span>
+                  <span style="font-size: 12px;">↗</span>
+                </a>
+              </div>
+              <span class="sn-link-cat-badge" style="flex-shrink: 0;">${escapeHtml(l.category || 'General')}</span>
+            </div>
+            ${altBadgesHtml}
+            <div style="margin-top: 8px;">
+              ${noteHtml}
+            </div>
+          </div>
+
+          <div class="sn-link-card-footer">
+            <span class="sn-link-domain" title="${escapeHtml(l.url)}">${escapeHtml(info.displayDomain)}</span>
+            <div class="sn-link-actions">
+              <button class="sn-link-icon-btn sn-copy-link-btn" data-raw="${escapeHtml(info.rawPath)}" title="Copy Primary URL / Path">Copy</button>
+              <button class="sn-link-icon-btn sn-edit-link-btn" data-id="${l.id}" title="Edit">Edit</button>
+              <button class="sn-link-icon-btn danger sn-del-link-btn" data-id="${l.id}" title="Delete">Delete</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    // Event listener for toggling favourite status
+    grid.querySelectorAll('.sn-toggle-fav-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute('data-id');
+        const item = userLinks.find(x => x.id === id);
+        if (item) {
+          item.favourite = !item.favourite;
+          saveUserLinksToStorage();
+          renderUserLinks();
+        }
+      });
+    });
+	
+	// Track clicks on links to sort by frequency of use
+    grid.querySelectorAll('.sn-launch-link').forEach(a => {
+      a.addEventListener('click', (e) => {
+        const id = a.getAttribute('data-link-id');
+        if (id) {
+          const item = userLinks.find(x => x.id === id);
+          if (item) {
+            item.clickCount = (item.clickCount || 0) + 1;
+            saveUserLinksToStorage();
+          }
+        }
+
+        if (a.getAttribute('data-local') === 'true') {
+          e.preventDefault();
+          const rawPath = a.getAttribute('data-raw');
+          navigator.clipboard.writeText(rawPath).then(() => {
+            const container = document.getElementById('sn-toast-container');
+            if (container) {
+              const t = document.createElement('div');
+              t.className = 'sn-toast';
+              t.style.borderLeftColor = '#eab308';
+              t.innerHTML = `
+                <div class="sn-toast-header"><span>📁 Local Path Copied!</span></div>
+                <div class="sn-toast-desc">Browsers block direct local file execution from web tabs. Path copied to clipboard:<br><code style="color:#fde047;">${escapeHtml(rawPath)}</code><br>Press <strong>Win + R</strong> and <strong>Ctrl + V</strong> to open immediately.</div>
+              `;
+              container.appendChild(t);
+              setTimeout(() => { if (t.parentNode) t.remove(); }, 7000);
+            }
+          });
+        }
+      });
+    });
+
+    // Handle Local File clicks
+    grid.querySelectorAll('.sn-launch-link').forEach(a => {
+      a.addEventListener('click', (e) => {
+        if (a.getAttribute('data-local') === 'true') {
+          e.preventDefault();
+          const rawPath = a.getAttribute('data-raw');
+          navigator.clipboard.writeText(rawPath).then(() => {
+            const container = document.getElementById('sn-toast-container');
+            if (container) {
+              const t = document.createElement('div');
+              t.className = 'sn-toast';
+              t.style.borderLeftColor = '#eab308';
+              t.innerHTML = `
+                <div class="sn-toast-header"><span>📁 Local Path Copied!</span></div>
+                <div class="sn-toast-desc">Browsers block direct local file execution from web tabs. Path copied to clipboard:<br><code style="color:#fde047;">${escapeHtml(rawPath)}</code><br>Press <strong>Win + R</strong> and <strong>Ctrl + V</strong> to open immediately.</div>
+              `;
+              container.appendChild(t);
+              setTimeout(() => { if (t.parentNode) t.remove(); }, 7000);
+            }
+          });
+        }
+      });
+    });
+
+    grid.querySelectorAll('.sn-copy-link-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const raw = btn.getAttribute('data-raw');
+        navigator.clipboard.writeText(raw);
+        const orig = btn.innerText;
+        btn.innerText = orig === '📋' ? '✓' : 'Copied!';
+        setTimeout(() => { btn.innerText = orig; }, 1500);
+      });
+    });
+
+    grid.querySelectorAll('.sn-edit-link-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.getAttribute('data-id');
+        const item = userLinks.find(x => x.id === id);
+        if (item && typeof window.snOpenLinkFormForEdit === 'function') {
+          window.snOpenLinkFormForEdit(item);
+        }
+      });
+    });
+
+    grid.querySelectorAll('.sn-del-link-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.getAttribute('data-id');
+        const item = userLinks.find(x => x.id === id);
+        if (item && confirm(`Delete "${item.name}" from your saved links?`)) {
+          userLinks = userLinks.filter(x => x.id !== id);
+          saveUserLinksToStorage();
+          renderUserLinks();
+        }
+      });
+    });
   }
 
   function getStateBadgeClass(stateText) {

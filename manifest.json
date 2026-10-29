@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ServiceNow Simplifier Dashboard",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Auto-refreshing ticket queue and simplified UI for ServiceNow",
   "content_scripts": [
     {
