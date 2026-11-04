@@ -1,8 +1,17 @@
 (function () {
+  // When this file runs in the extension's ISOLATED world (second manifest entry), it can read
+  // the real manifest version. Publish it on <html> for the MAIN-world copy to read, then stop.
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.getManifest === 'function') {
+      document.documentElement.setAttribute('data-sn-simplifier-version', chrome.runtime.getManifest().version);
+      return;
+    }
+  } catch (e) {}
+
   if (window.top !== window.self) return;
 
   // Version & GitHub Auto-Check Config
-  const FALLBACK_VERSION = '1.0.4';
+  const FALLBACK_VERSION = '1.0.6'; // Only used if the manifest version can't be read
   const GITHUB_API_MANIFEST_URL = 'https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/manifest.json?ref=main';
   const GITHUB_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
 
@@ -41,6 +50,15 @@
   let chgSelectedRequested = localStorage.getItem('sn_helper_chg_requested') || 'ALL';
   let savedChgApprovalsRaw = localStorage.getItem('sn_helper_chg_approvals');
   let chgSelectedApprovals = savedChgApprovalsRaw ? JSON.parse(savedChgApprovalsRaw) : null;
+  // States are stored as an exclusion list so newly seen states show up by default
+  let chgExcludedStates = [];
+  try {
+    chgExcludedStates = JSON.parse(localStorage.getItem('sn_helper_chg_states_excluded') || '[]');
+    if (!Array.isArray(chgExcludedStates)) chgExcludedStates = [];
+  } catch (e) {
+    chgExcludedStates = [];
+  }
+  let chgKnownStates = [];
 
   // --- CURRENT USER IDENTITY ---
   let cachedUserId = localStorage.getItem('sn_helper_user_sys_id') || null;
@@ -60,11 +78,9 @@
   }
 
   function getLocalVersion() {
-    try {
-      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest) {
-        return chrome.runtime.getManifest().version;
-      }
-    } catch (e) {}
+    // Set by the ISOLATED-world copy of this script from manifest.json (see top of file)
+    const fromManifest = document.documentElement.getAttribute('data-sn-simplifier-version');
+    if (fromManifest) return fromManifest.trim();
     return FALLBACK_VERSION;
   }
 
@@ -119,7 +135,7 @@
         const toggleBtn = document.getElementById('sn-helper-toggle');
 
         if (banner && bannerText) {
-          bannerText.innerHTML = `🚀 <strong>Update Available (v${remoteVer})!</strong> You are currently on v${localVer}. Run <code>Update_Extension.bat</code> in your extension folder, then refresh ServiceNow.`;
+          bannerText.innerHTML = `🚀 <strong>Update Available (v${escapeHtml(remoteVer)})!</strong> You are currently on v${escapeHtml(localVer)}. Run <code>Update_Extension.bat</code> in your extension folder, then refresh ServiceNow.`;
           banner.classList.remove('sn-hidden');
         }
         if (toggleBtn && toggleBtn.innerText === 'Open Support Hub') {
@@ -303,8 +319,8 @@
         <span>🚨 New Unassigned ${typeLabel}</span>
         <button class="sn-toast-close" title="Dismiss">&times;</button>
       </div>
-      <div class="sn-toast-title">${ticket.number} • Priority: ${ticket.priority || '—'}</div>
-      <div class="sn-toast-desc">${ticket.short_description || 'No description'}</div>
+      <div class="sn-toast-title">${escapeHtml(ticket.number)} • Priority: ${escapeHtml(ticket.priority || '—')}</div>
+      <div class="sn-toast-desc">${escapeHtml(ticket.short_description || 'No description')}</div>
       <div class="sn-toast-cta">Click to open New Ticket Queue →</div>
     `;
 
@@ -370,8 +386,8 @@
           <span>${headerTitle}</span>
           <button class="sn-toast-close" title="Dismiss">&times;</button>
         </div>
-        <div class="sn-toast-title">${number}</div>
-        <div class="sn-toast-desc">${shortDesc}<br><span style="font-size:11px; color:#cbd5e1;">${subInfo}</span></div>
+        <div class="sn-toast-title">${escapeHtml(number)}</div>
+        <div class="sn-toast-desc">${escapeHtml(shortDesc)}<br><span style="font-size:11px; color:#cbd5e1;">${escapeHtml(subInfo)}</span></div>
         <div class="sn-toast-cta">Click to view Change Request →</div>
       `;
 
@@ -454,7 +470,7 @@
 
     const sorted = Array.from(allKnownGroups).sort((a, b) => a.localeCompare(b));
     const optionsHtml = sorted.map(g => `
-      <option value="${g}" ${notificationGroup === g ? 'selected' : ''}>${g}</option>
+      <option value="${escapeHtml(g)}" ${notificationGroup === g ? 'selected' : ''}>${escapeHtml(g)}</option>
     `).join('');
 
     const modalSelect = document.getElementById('sn-modal-notif-group-select');
@@ -500,16 +516,30 @@
       cases: document.getElementById('sn-view-cases'),
       changes: document.getElementById('sn-view-changes'),
       links: document.getElementById('sn-view-links'),
-      notes: document.getElementById('sn-view-notes'),
-      todos: document.getElementById('sn-view-todos')
+      mine: document.getElementById('sn-view-mine'),
+      bugs: document.getElementById('sn-view-bugs')
     };
+
+    // Fall back to the hub if a saved view no longer exists (e.g. the removed Notes / To-Do pages)
+    if (!views[currentView]) {
+      currentView = 'hub';
+      localStorage.setItem('sn_helper_view', currentView);
+    }
 
     Object.keys(views).forEach(k => {
       if (views[k]) views[k].classList.toggle('sn-view-hidden', k !== currentView);
     });
 
-    if (targetView === 'links') {
+    if (currentView === 'links') {
       renderUserLinks();
+    }
+    if (currentView === 'mine') {
+      renderMineTable();
+      fetchMyTickets();
+    }
+    if (currentView === 'bugs') {
+      renderBugs();
+      refreshLiveTicketStates();
     }
   }
 
@@ -598,28 +628,32 @@
             </div>
 			<div class="sn-hub-section-divider">Personal Workspace & Tools (Saved Locally)</div>
             <div class="sn-hub-tools-grid">
+              <div class="sn-hub-tool-card" id="sn-go-mine">
+                <div class="sn-hub-tool-top">
+                  <h4 class="sn-hub-tool-title">🙋 Assigned to Me</h4>
+                  <span class="sn-hub-badge" id="sn-hub-mine-count" style="background: #334155;">…</span>
+                </div>
+                <div class="sn-tile-preview" id="sn-hub-mine-preview">
+                  <p class="sn-hub-tool-desc">Your open CS &amp; INC tickets, with notes, tasks, and known-bug links.</p>
+                </div>
+              </div>
+
+              <div class="sn-hub-tool-card" id="sn-go-bugs">
+                <div class="sn-hub-tool-top">
+                  <h4 class="sn-hub-tool-title">🐞 Known Bugs</h4>
+                  <span class="sn-hub-badge" id="sn-hub-bugs-count" style="background: #334155;">0 Active</span>
+                </div>
+                <div class="sn-tile-preview" id="sn-hub-bugs-preview">
+                  <p class="sn-hub-tool-desc">Track recurring issues and see every ticket reporting the same bug.</p>
+                </div>
+              </div>
+
               <div class="sn-hub-tool-card" id="sn-go-links">
                 <div class="sn-hub-tool-top">
                   <h4 class="sn-hub-tool-title">🔗 Quick Links & Tools</h4>
                   <span class="sn-hub-badge" id="sn-hub-links-count" style="background: #334155;">0 Saved</span>
                 </div>
                 <p class="sn-hub-tool-desc">Save your personal bookmarks, internal dashboards, documentation, and local file/script paths with custom notes.</p>
-              </div>
-
-              <div class="sn-hub-tool-card sn-placeholder-card" id="sn-go-notes">
-                <div class="sn-hub-tool-top">
-                  <h4 class="sn-hub-tool-title">📝 Personal Notes</h4>
-                  <span class="sn-hub-badge" style="background: #1e293b; color: #94a3b8; border: 1px solid #334155;">Coming Soon</span>
-                </div>
-                <p class="sn-hub-tool-desc">Scratchpad for quick troubleshooting snippets, standard responses, and shift handover notes.</p>
-              </div>
-
-              <div class="sn-hub-tool-card sn-placeholder-card" id="sn-go-todos">
-                <div class="sn-hub-tool-top">
-                  <h4 class="sn-hub-tool-title">✅ To-Do List</h4>
-                  <span class="sn-hub-badge" style="background: #1e293b; color: #94a3b8; border: 1px solid #334155;">Coming Soon</span>
-                </div>
-                <p class="sn-hub-tool-desc">Track your personal daily tasks, follow-ups, and reminders alongside your ServiceNow queues.</p>
               </div>
             </div>
           </div>
@@ -784,6 +818,21 @@
             </div>
 
             <div class="sn-filter-group">
+              <span class="sn-filter-label">State</span>
+              <div class="sn-dropdown-container" id="sn-chg-state-dropdown-container">
+                <button class="sn-dropdown-btn" id="sn-chg-state-drop-btn">All States</button>
+                <div class="sn-dropdown-content" id="sn-chg-state-drop-content">
+                  <div id="sn-chg-state-checkboxes"></div>
+                  <div class="sn-dropdown-actions">
+                    <button class="sn-dropdown-action-link" id="sn-chg-state-select-all">All</button>
+                    <button class="sn-dropdown-action-link" id="sn-chg-state-active-only" title="Hide Closed and Cancelled changes">Active only</button>
+                    <button class="sn-dropdown-action-link" id="sn-chg-state-clear-all">Clear</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sn-filter-group">
               <span class="sn-filter-label">Assigned To</span>
               <select id="sn-chg-assigned-select" class="sn-select">
                 <option value="ALL">All Assigned Users</option>
@@ -881,37 +930,120 @@
         </div>
       </div>
 
-      <!-- 6. PLACEHOLDER: PERSONAL NOTES VIEW -->
-      <div id="sn-view-notes" class="sn-view-section sn-view-hidden">
+      <!-- 6. ASSIGNED TO ME VIEW -->
+      <div id="sn-view-mine" class="sn-view-section sn-view-hidden">
         <div class="sn-header">
           <div class="sn-title-area">
             <div class="sn-title-row">
-              <button class="sn-back-hub-btn" id="sn-notes-back-btn">← Support Hub</button>
-              <h1>Personal Notes</h1>
+              <button class="sn-back-hub-btn" id="sn-mine-back-btn">← Support Hub</button>
+              <h1>Assigned to Me</h1>
             </div>
-            <div class="sn-status-bar">Personal scratchpad & templates</div>
+            <div class="sn-status-bar" id="sn-mine-status-text">Loading your tickets...</div>
+          </div>
+          <div class="sn-controls">
+            <div class="sn-filter-group">
+              <span class="sn-filter-label">Ticket Type</span>
+              <select id="sn-mine-type" class="sn-select" style="min-width: 140px;">
+                <option value="ALL">All (CS & INC)</option>
+                <option value="CS">CS Only</option>
+                <option value="INC">INC Only</option>
+              </select>
+            </div>
+            <div class="sn-filter-group">
+              <span class="sn-filter-label">Known Bug</span>
+              <select id="sn-mine-bug" class="sn-select"></select>
+            </div>
+            <div class="sn-filter-group">
+              <span class="sn-filter-label">Search</span>
+              <input type="text" id="sn-mine-search" class="sn-links-input sn-mine-search" placeholder="Number or description..." autocomplete="off" />
+            </div>
+            <button class="sn-btn sn-toggle-btn" id="sn-mine-open-sort-btn" title="Show tickets in an open state first, longest-waiting at the top (time since the ticket last entered an open state, from its state history)">⏱ Open first</button>
+            <button class="sn-btn" id="sn-mine-refresh-btn">Refresh Now</button>
+            <button class="sn-btn" id="sn-mine-bugs-btn">🐞 Manage Known Bugs</button>
           </div>
         </div>
-        <div style="text-align: center; padding: 60px 20px; color: #94a3b8;">
-          <h2 style="color: #f8fafc; margin-bottom: 8px;">📝 Personal Notes — Coming Soon</h2>
-          <p>This space will hold your locally saved notes, command snippets, and ticket templates.</p>
-        </div>
+
+        <div class="sn-mine-note" id="sn-mine-note" style="display: none;"></div>
+        <table class="sn-table sn-mine-table">
+          <thead>
+            <tr>
+              <th>Number</th>
+              <th>Priority</th>
+              <th>State</th>
+              <th>Short Description</th>
+              <th>Known Bug</th>
+              <th>Notes &amp; Tasks</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody id="sn-mine-body">
+            <tr><td colspan="7">Loading your tickets...</td></tr>
+          </tbody>
+        </table>
+        <div id="sn-mine-other" class="sn-mine-other"></div>
       </div>
 
-      <!-- 7. PLACEHOLDER: TO-DO LIST VIEW -->
-      <div id="sn-view-todos" class="sn-view-section sn-view-hidden">
+      <!-- 7. KNOWN BUGS VIEW -->
+      <div id="sn-view-bugs" class="sn-view-section sn-view-hidden">
         <div class="sn-header">
           <div class="sn-title-area">
             <div class="sn-title-row">
-              <button class="sn-back-hub-btn" id="sn-todos-back-btn">← Support Hub</button>
-              <h1>Personal To-Do List</h1>
+              <button class="sn-back-hub-btn" id="sn-bugs-back-btn">← Support Hub</button>
+              <h1>Known Bugs</h1>
             </div>
-            <div class="sn-status-bar">Personal task & follow-up tracker</div>
+            <div class="sn-status-bar">Saved privately in your browser • Link tickets to a bug from the Assigned to Me page</div>
           </div>
         </div>
-        <div style="text-align: center; padding: 60px 20px; color: #94a3b8;">
-          <h2 style="color: #f8fafc; margin-bottom: 8px;">✅ To-Do List — Coming Soon</h2>
-          <p>This space will let you manage personal action items and reminders saved directly in your browser.</p>
+
+        <div class="sn-links-container">
+          <div class="sn-links-top-actions">
+            <button class="sn-btn sn-btn-primary" id="sn-bug-toggle-form-btn" style="margin-top: 0;">➕ New Known Bug</button>
+            <div class="sn-links-categories" id="sn-bug-filter"></div>
+            <div class="sn-bug-toolbar-right">
+              <input type="text" id="sn-bug-search" class="sn-links-input" style="max-width: 220px;" placeholder="🔍 Filter bugs or tickets..." autocomplete="off" />
+              <button class="sn-btn" id="sn-bugs-export-btn" style="margin-top: 0; background: #334155; font-size: 12px;">⬇ Export</button>
+              <button class="sn-btn" id="sn-bugs-import-btn" style="margin-top: 0; background: #334155; font-size: 12px;">⬆ Import</button>
+              <input type="file" id="sn-bugs-import-input" accept=".json" style="display: none;" />
+            </div>
+          </div>
+
+          <div class="sn-links-form-card sn-hidden" id="sn-bug-form-card">
+            <div class="sn-links-form-title">
+              <span id="sn-bug-form-heading">🐞 New Known Bug</span>
+            </div>
+            <div class="sn-form-grid sn-bug-form-grid">
+              <label class="sn-form-field sn-span-2">
+                <span>Bug title *</span>
+                <input type="text" id="sn-bug-title" class="sn-links-input" placeholder="e.g. Darwin feed delays after 02:00 restart" autocomplete="off" />
+              </label>
+              <label class="sn-form-field">
+                <span>Reference</span>
+                <input type="text" id="sn-bug-ref" class="sn-links-input" placeholder="e.g. PRB0012345, JIRA-123" autocomplete="off" />
+              </label>
+              <label class="sn-form-field">
+                <span>Status</span>
+                <select id="sn-bug-status" class="sn-links-input">
+                  <option value="open">Open</option>
+                  <option value="fixing">Fix in progress</option>
+                  <option value="resolved">Resolved</option>
+                </select>
+              </label>
+              <label class="sn-form-field sn-span-full">
+                <span>Description / symptoms</span>
+                <textarea id="sn-bug-desc" class="sn-links-input" rows="3" placeholder="What do customers report? How do you recognise it?"></textarea>
+              </label>
+              <label class="sn-form-field sn-span-full">
+                <span>Workaround</span>
+                <textarea id="sn-bug-workaround" class="sn-links-input" rows="2" placeholder="Any known workaround or standard response"></textarea>
+              </label>
+            </div>
+            <div class="sn-form-actions">
+              <button class="sn-link-icon-btn" id="sn-bug-cancel-btn" style="padding: 8px 14px; font-size: 12px;">Cancel</button>
+              <button class="sn-btn sn-btn-primary" id="sn-bug-save-btn" style="margin-top: 0; padding: 9px 20px;">Save Bug</button>
+            </div>
+          </div>
+
+          <div class="sn-bug-list" id="sn-bug-list"></div>
         </div>
       </div>
     `;
@@ -928,6 +1060,7 @@
           </div>
           <button class="sn-preview-close" id="sn-modal-close-btn">&times;</button>
         </div>
+        <div class="sn-preview-content">
         <div class="sn-preview-body">
           <div class="sn-preview-meta-grid" id="sn-modal-meta-grid"></div>
 
@@ -940,6 +1073,8 @@
             <span class="sn-preview-section-title">Full Description</span>
             <div class="sn-preview-desc-box" id="sn-modal-desc">Loading description...</div>
           </div>
+        </div>
+        <aside class="sn-ws-panel" id="sn-ws-panel" style="display: none;"></aside>
         </div>
         <div class="sn-preview-footer">
           <button class="sn-preview-link-btn" id="sn-modal-native-link">Open full ticket in ServiceNow ↗</button>
@@ -984,14 +1119,19 @@
     document.getElementById('sn-go-cases').addEventListener('click', () => switchView('cases'));
     document.getElementById('sn-go-changes').addEventListener('click', () => switchView('changes'));
 	document.getElementById('sn-go-links').addEventListener('click', () => switchView('links'));
-    document.getElementById('sn-go-notes').addEventListener('click', () => switchView('notes'));
-    document.getElementById('sn-go-todos').addEventListener('click', () => switchView('todos'));
+    document.getElementById('sn-go-mine').addEventListener('click', () => switchView('mine'));
+    document.getElementById('sn-go-bugs').addEventListener('click', () => switchView('bugs'));
 
     document.getElementById('sn-links-back-btn').addEventListener('click', () => switchView('hub'));
-    document.getElementById('sn-notes-back-btn').addEventListener('click', () => switchView('hub'));
-    document.getElementById('sn-todos-back-btn').addEventListener('click', () => switchView('hub'));
+    document.getElementById('sn-mine-back-btn').addEventListener('click', () => switchView('hub'));
+    document.getElementById('sn-bugs-back-btn').addEventListener('click', () => switchView('hub'));
 
     initLinksManagerEvents();
+    initMineEvents();
+    initBugsEvents();
+    initWorkspacePanelEvents();
+    renderMineHubTile();
+    renderBugsHubTile();
     renderUserLinks();
     document.getElementById('sn-newq-back-btn').addEventListener('click', () => switchView('hub'));
     document.getElementById('sn-case-back-btn').addEventListener('click', () => switchView('hub'));
@@ -1013,7 +1153,14 @@
     document.getElementById('sn-hub-notif-btn').addEventListener('click', handleAlertBtnClick);
     document.getElementById('sn-newq-notif-btn').addEventListener('click', handleAlertBtnClick);
 
-    const closePreview = () => previewModal.classList.remove('show');
+    const closePreview = () => {
+      previewModal.classList.remove('show');
+      if (workspaceTicket) {
+        workspaceTicket = null;
+        if (currentView === 'mine') renderMineTable();
+        if (currentView === 'bugs') renderBugs();
+      }
+    };
     document.getElementById('sn-modal-close-btn').addEventListener('click', closePreview);
     document.getElementById('sn-modal-close-modal-btn').addEventListener('click', closePreview);
     previewModal.addEventListener('click', (e) => { if (e.target === previewModal) closePreview(); });
@@ -1056,6 +1203,15 @@
     chgDropBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       chgDropContent.classList.toggle('show');
+      chgStateDropContent.classList.remove('show');
+    });
+
+    const chgStateDropBtn = document.getElementById('sn-chg-state-drop-btn');
+    const chgStateDropContent = document.getElementById('sn-chg-state-drop-content');
+    chgStateDropBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      chgStateDropContent.classList.toggle('show');
+      chgDropContent.classList.remove('show');
     });
 
     document.addEventListener('click', (e) => {
@@ -1066,6 +1222,10 @@
       const chgDropContainer = document.getElementById('sn-chg-approval-dropdown-container');
       if (chgDropContainer && !chgDropContainer.contains(e.target)) {
         chgDropContent.classList.remove('show');
+      }
+      const chgStateDropContainer = document.getElementById('sn-chg-state-dropdown-container');
+      if (chgStateDropContainer && !chgStateDropContainer.contains(e.target)) {
+        chgStateDropContent.classList.remove('show');
       }
     });
 
@@ -1256,7 +1416,7 @@
     if (!tbody) return;
 
     if (unassignedQueueCS.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding: 28px; color: #94a3b8;">🎉 All clear! No unassigned CS or INC tickets in <strong>${targetGroup}</strong>.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding: 28px; color: #94a3b8;">🎉 All clear! No unassigned CS or INC tickets in <strong>${escapeHtml(targetGroup)}</strong>.</td></tr>`;
       return;
     }
 
@@ -1271,13 +1431,13 @@
 
         return `
           <tr>
-            <td><span class="sn-type-badge">${prefix}</span><a class="sn-link" href="#" data-sysid="${t.sys_id}">${t.number}</a></td>
-            <td><span class="sn-badge ${prioClass}">${t.priority || '—'}</span></td>
-            <td><span class="sn-state-badge ${stateClass}">${stateVal}</span></td>
-            <td>${t.short_description || ''}</td>
-            <td>${groupName}</td>
-            <td><span class="sn-unassigned-pill">Unassigned</span> <button class="sn-assign-btn" data-sysid="${t.sys_id}">Assign to me</button></td>
-            <td>${t.opened_at || ''}</td>
+            <td><span class="sn-type-badge">${escapeHtml(prefix)}</span><a class="sn-link" href="#" data-sysid="${escapeHtml(t.sys_id)}">${escapeHtml(t.number)}</a></td>
+            <td><span class="sn-badge ${prioClass}">${escapeHtml(t.priority || '—')}</span></td>
+            <td><span class="sn-state-badge ${stateClass}">${escapeHtml(stateVal)}</span></td>
+            <td>${escapeHtml(t.short_description || '')}</td>
+            <td>${escapeHtml(groupName)}</td>
+            <td><span class="sn-unassigned-pill">Unassigned</span> <button class="sn-assign-btn" data-sysid="${escapeHtml(t.sys_id)}">Assign to me</button></td>
+            <td>${escapeHtml(t.opened_at || '')}</td>
           </tr>
         `;
       })
@@ -1322,7 +1482,7 @@
 
     let groupOpts = `<option value="ALL" ${selectedGroup === 'ALL' ? 'selected' : ''}>All Active Groups</option>`;
     sortedGroups.forEach((g) => {
-      groupOpts += `<option value="${g}" ${selectedGroup === g ? 'selected' : ''}>${g}</option>`;
+      groupOpts += `<option value="${escapeHtml(g)}" ${selectedGroup === g ? 'selected' : ''}>${escapeHtml(g)}</option>`;
     });
     groupSelect.innerHTML = groupOpts;
 
@@ -1332,8 +1492,8 @@
         const isChecked = selectedStates.includes(st) ? 'checked' : '';
         return `
           <label class="sn-dropdown-item">
-            <input type="checkbox" value="${st}" ${isChecked} class="sn-state-cb" />
-            ${st}
+            <input type="checkbox" value="${escapeHtml(st)}" ${isChecked} class="sn-state-cb" />
+            ${escapeHtml(st)}
           </label>
         `;
       }).join('');
@@ -1413,7 +1573,7 @@
     if (userSelect) {
       let userOpts = `<option value="ALL" ${selectedUser === 'ALL' ? 'selected' : ''}>All Assigned Users (${sortedUsers.length})</option>`;
       sortedUsers.forEach((u) => {
-        userOpts += `<option value="${u}" ${selectedUser === u ? 'selected' : ''}>${u}</option>`;
+        userOpts += `<option value="${escapeHtml(u)}" ${selectedUser === u ? 'selected' : ''}>${escapeHtml(u)}</option>`;
       });
       userSelect.innerHTML = userOpts;
     }
@@ -1448,8 +1608,8 @@
         const rawUser = (t.assigned_to?.display_value || '').trim();
         
         const assignedToHtml = rawUser 
-          ? rawUser 
-          : `<span class="sn-unassigned-pill">Unassigned</span> <button class="sn-assign-btn" data-sysid="${t.sys_id}">Assign to me</button>`;
+          ? escapeHtml(rawUser)
+          : `<span class="sn-unassigned-pill">Unassigned</span> <button class="sn-assign-btn" data-sysid="${escapeHtml(t.sys_id)}">Assign to me</button>`;
         
         const prefix = getTicketPrefix(t.number);
         const prioNum = (t.priority || '').charAt(0);
@@ -1460,13 +1620,13 @@
 
         return `
           <tr>
-            <td><span class="sn-type-badge">${prefix}</span><a class="sn-link" href="#" data-sysid="${t.sys_id}">${t.number}</a></td>
-            <td><span class="sn-badge ${prioClass}">${t.priority || '—'}</span></td>
-            <td><span class="sn-state-badge ${stateClass}">${stateVal}</span></td>
-            <td>${t.short_description || ''}</td>
-            <td>${groupName}</td>
+            <td><span class="sn-type-badge">${escapeHtml(prefix)}</span><a class="sn-link" href="#" data-sysid="${escapeHtml(t.sys_id)}">${escapeHtml(t.number)}</a></td>
+            <td><span class="sn-badge ${prioClass}">${escapeHtml(t.priority || '—')}</span></td>
+            <td><span class="sn-state-badge ${stateClass}">${escapeHtml(stateVal)}</span></td>
+            <td>${escapeHtml(t.short_description || '')}</td>
+            <td>${escapeHtml(groupName)}</td>
             <td>${assignedToHtml}</td>
-            <td>${t.opened_at || ''}</td>
+            <td>${escapeHtml(t.opened_at || '')}</td>
           </tr>
         `;
       })
@@ -1500,18 +1660,19 @@
     try {
       if (statusText) statusText.innerText = 'Refreshing change requests...';
 
-      const globalQuery = 'active=true^ORDERBYDESCsys_created_on';
+      // Removed 'active=true^' so closed and historical changes are included
+      const globalQuery = 'ORDERBYDESCsys_created_on';
       const globalUrl = `/api/now/table/change_request?sysparm_query=${encodeURIComponent(globalQuery)}&sysparm_limit=200&sysparm_display_value=all&sysparm_fields=${fields}`;
 
       const requests = [fetch(globalUrl, { headers })];
       if (chgSelectedGroup !== 'ALL') {
-        const groupQuery = `active=true^assignment_group.name=${chgSelectedGroup}^ORDERBYDESCsys_created_on`;
+        const groupQuery = `assignment_group.name=${chgSelectedGroup}^ORDERBYDESCsys_created_on`;
         const groupUrl = `/api/now/table/change_request?sysparm_query=${encodeURIComponent(groupQuery)}&sysparm_limit=200&sysparm_display_value=all&sysparm_fields=${fields}`;
         requests.push(fetch(groupUrl, { headers }));
       }
 
       if (currentUserId) {
-        const myChgQuery = `active=true^assigned_to=${currentUserId}^ORDERBYstart_date`;
+        const myChgQuery = `assigned_to=${currentUserId}^ORDERBYDESCsys_created_on`;
         const myChgUrl = `/api/now/table/change_request?sysparm_query=${encodeURIComponent(myChgQuery)}&sysparm_limit=50&sysparm_display_value=all&sysparm_fields=${fields}`;
         requests.push(fetch(myChgUrl, { headers }));
       }
@@ -1681,26 +1842,26 @@
         if (isPastEnd) {
           itemStateClass = 'sn-chg-review-needed';
           statusPillHtml = '<span class="sn-chg-status-pill sn-pill-overdue">⚠️ Review / Close</span>';
-          actionBannerHtml = `<div class="sn-upcoming-action-banner">Window ended while in <strong>${stateVal}</strong>. Move to Review to clear.</div>`;
+          actionBannerHtml = `<div class="sn-upcoming-action-banner">Window ended while in <strong>${escapeHtml(stateVal)}</strong>. Move to Review to clear.</div>`;
         } else if (isActiveNow) {
           itemStateClass = 'sn-chg-active-now';
           statusPillHtml = '<span class="sn-chg-status-pill sn-pill-active">🟢 Window Active</span>';
         }
 
         const scheduleText = startDisp
-          ? `<div><strong>Start:</strong> ${startDisp}</div>${endDisp ? `<div><strong>End:</strong> ${endDisp}</div>` : ''}`
+          ? `<div><strong>Start:</strong> ${escapeHtml(startDisp)}</div>${endDisp ? `<div><strong>End:</strong> ${escapeHtml(endDisp)}</div>` : ''}`
           : '<div><em>No scheduled start date set</em></div>';
 
         return `
-          <div class="sn-upcoming-item ${itemStateClass}" data-sysid="${sysId}" title="Click to preview ${number}">
+          <div class="sn-upcoming-item ${itemStateClass}" data-sysid="${escapeHtml(sysId)}" title="Click to preview ${escapeHtml(number)}">
             <div class="sn-upcoming-item-top">
               <span class="sn-upcoming-number">
-                ${number}
+                ${escapeHtml(number)}${notesCountBadgeHtml(number)}
                 ${statusPillHtml}
               </span>
-              <span class="sn-state-badge ${stateClass}" style="font-size: 10.5px; padding: 2px 7px;">${stateVal} • ${approvalVal}</span>
+              <span class="sn-state-badge ${stateClass}" style="font-size: 10.5px; padding: 2px 7px;">${escapeHtml(stateVal)} • ${escapeHtml(approvalVal)}</span>
             </div>
-            <div class="sn-upcoming-desc">${shortDesc}</div>
+            <div class="sn-upcoming-desc">${escapeHtml(shortDesc)}</div>
             ${actionBannerHtml}
             <div class="sn-upcoming-time">${scheduleText}</div>
           </div>
@@ -1743,7 +1904,7 @@
 
     let groupOpts = `<option value="ALL" ${chgSelectedGroup === 'ALL' ? 'selected' : ''}>All Active Groups</option>`;
     sortedGroups.forEach((g) => {
-      groupOpts += `<option value="${g}" ${chgSelectedGroup === g ? 'selected' : ''}>${g}</option>`;
+      groupOpts += `<option value="${escapeHtml(g)}" ${chgSelectedGroup === g ? 'selected' : ''}>${escapeHtml(g)}</option>`;
     });
     groupSelect.innerHTML = groupOpts;
 
@@ -1753,8 +1914,8 @@
         const isChecked = chgSelectedApprovals.includes(ap) ? 'checked' : '';
         return `
           <label class="sn-dropdown-item">
-            <input type="checkbox" value="${ap}" ${isChecked} class="sn-chg-ap-cb" />
-            ${ap}
+            <input type="checkbox" value="${escapeHtml(ap)}" ${isChecked} class="sn-chg-ap-cb" />
+            ${escapeHtml(ap)}
           </label>
         `;
       }).join('');
@@ -1787,6 +1948,92 @@
     };
 
     updateChangeApprovalButtonLabel();
+    updateChangeStateFilter();
+  }
+
+  // Lifecycle order for change states; anything unrecognised sorts alphabetically after these
+  const CHG_STATE_ORDER = ['new', 'assess', 'authorize', 'scheduled', 'implement', 'review', 'closed', 'canceled', 'cancelled'];
+
+  function getChangeStateLabel(c) {
+    return getVal(c.state) || 'Unknown';
+  }
+
+  function isInactiveChangeState(label) {
+    return /closed|cancel|complete/i.test(label || '');
+  }
+
+  function saveChgExcludedStates() {
+    localStorage.setItem('sn_helper_chg_states_excluded', JSON.stringify(chgExcludedStates));
+  }
+
+  function updateChangeStateFilter() {
+    const container = document.getElementById('sn-chg-state-checkboxes');
+    if (!container) return;
+
+    const rank = (label) => {
+      const i = CHG_STATE_ORDER.indexOf(label.toLowerCase().trim());
+      return i === -1 ? CHG_STATE_ORDER.length : i;
+    };
+    chgKnownStates = Array.from(new Set(allChanges.map(getChangeStateLabel)))
+      .sort((a, b) => (rank(a) - rank(b)) || a.localeCompare(b));
+
+    const counts = {};
+    allChanges.forEach((c) => {
+      const st = getChangeStateLabel(c);
+      counts[st] = (counts[st] || 0) + 1;
+    });
+
+    container.innerHTML = chgKnownStates.map((st) => `
+      <label class="sn-dropdown-item">
+        <input type="checkbox" value="${escapeHtml(st)}" ${chgExcludedStates.includes(st) ? '' : 'checked'} class="sn-chg-state-cb" />
+        <span class="sn-state-badge ${getStateBadgeClass(st)}" style="font-size: 11px; padding: 1px 6px;">${escapeHtml(st)}</span>
+        <span style="margin-left: auto; color: #64748b; font-size: 11px;">${counts[st] || 0}</span>
+      </label>
+    `).join('');
+
+    container.querySelectorAll('.sn-chg-state-cb').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        const st = cb.value;
+        chgExcludedStates = chgExcludedStates.filter((x) => x !== st);
+        if (!cb.checked) chgExcludedStates.push(st);
+        saveChgExcludedStates();
+        updateChangeStateButtonLabel();
+        applyChangeFiltersAndRender();
+      });
+    });
+
+    const setExcluded = (list) => {
+      chgExcludedStates = list;
+      saveChgExcludedStates();
+      updateChangeStateFilter();
+      applyChangeFiltersAndRender();
+    };
+    document.getElementById('sn-chg-state-select-all').onclick = (e) => {
+      e.preventDefault();
+      setExcluded([]);
+    };
+    document.getElementById('sn-chg-state-active-only').onclick = (e) => {
+      e.preventDefault();
+      setExcluded(chgKnownStates.filter(isInactiveChangeState));
+    };
+    document.getElementById('sn-chg-state-clear-all').onclick = (e) => {
+      e.preventDefault();
+      setExcluded([...chgKnownStates]);
+    };
+
+    updateChangeStateButtonLabel();
+  }
+
+  function updateChangeStateButtonLabel() {
+    const btn = document.getElementById('sn-chg-state-drop-btn');
+    if (!btn) return;
+    const total = chgKnownStates.length;
+    const shown = chgKnownStates.filter((st) => !chgExcludedStates.includes(st)).length;
+    if (total === 0 || shown === total) btn.innerText = 'All States';
+    else if (shown === 0) btn.innerText = '0 States Selected';
+    else if (chgKnownStates.filter((st) => !chgExcludedStates.includes(st)).every((st) => !isInactiveChangeState(st))
+      && chgKnownStates.filter(isInactiveChangeState).every((st) => chgExcludedStates.includes(st))) btn.innerText = `Active only (${shown})`;
+    else btn.innerText = `States (${shown} of ${total})`;
   }
 
   function updateChangeApprovalButtonLabel() {
@@ -1815,6 +2062,10 @@
       filtered = [];
     }
 
+    if (chgExcludedStates.length > 0) {
+      filtered = filtered.filter((c) => !chgExcludedStates.includes(getChangeStateLabel(c)));
+    }
+
     const uniqueAssigned = new Set();
     const uniqueRequested = new Set();
     filtered.forEach((c) => {
@@ -1839,7 +2090,7 @@
     if (assignedSelect) {
       let assOpts = `<option value="ALL" ${chgSelectedAssigned === 'ALL' ? 'selected' : ''}>All Assigned Users (${sortedAssigned.length})</option>`;
       sortedAssigned.forEach((u) => {
-        assOpts += `<option value="${u}" ${chgSelectedAssigned === u ? 'selected' : ''}>${u}</option>`;
+        assOpts += `<option value="${escapeHtml(u)}" ${chgSelectedAssigned === u ? 'selected' : ''}>${escapeHtml(u)}</option>`;
       });
       assignedSelect.innerHTML = assOpts;
     }
@@ -1847,7 +2098,7 @@
     if (requestedSelect) {
       let reqOpts = `<option value="ALL" ${chgSelectedRequested === 'ALL' ? 'selected' : ''}>All Requesters (${sortedRequested.length})</option>`;
       sortedRequested.forEach((u) => {
-        reqOpts += `<option value="${u}" ${chgSelectedRequested === u ? 'selected' : ''}>${u}</option>`;
+        reqOpts += `<option value="${escapeHtml(u)}" ${chgSelectedRequested === u ? 'selected' : ''}>${escapeHtml(u)}</option>`;
       });
       requestedSelect.innerHTML = reqOpts;
     }
@@ -1884,8 +2135,8 @@
         const shortDesc = getVal(c.short_description);
         const rawUser = getVal(c.assigned_to);
         const assignedToHtml = rawUser 
-          ? rawUser 
-          : `<span class="sn-unassigned-pill">Unassigned</span> <button class="sn-assign-btn" data-sysid="${sysId}">Assign to me</button>`;
+          ? escapeHtml(rawUser)
+          : `<span class="sn-unassigned-pill">Unassigned</span> <button class="sn-assign-btn" data-sysid="${escapeHtml(sysId)}">Assign to me</button>`;
 
         const requestedByName = getVal(c.requested_by) || '—';
         const chgType = getVal(c.type) || '—';
@@ -1897,19 +2148,19 @@
         const start = getVal(c.start_date);
         const end = getVal(c.end_date);
         const scheduleHtml = start 
-          ? `<div><strong>Start:</strong> ${start}</div>${end ? `<div style="font-size:12px; color:#94a3b8;"><strong>End:</strong> ${end}</div>` : ''}`
+          ? `<div><strong>Start:</strong> ${escapeHtml(start)}</div>${end ? `<div style="font-size:12px; color:#94a3b8;"><strong>End:</strong> ${escapeHtml(end)}</div>` : ''}`
           : '<span style="color:#94a3b8;">Not scheduled</span>';
 
         return `
           <tr>
-            <td><span class="sn-type-badge">CHG</span><a class="sn-link" href="#" data-sysid="${sysId}">${number}</a></td>
-            <td><span class="sn-badge">${chgType}</span></td>
-            <td><span class="sn-state-badge ${approvalClass}">${approvalVal}</span></td>
-            <td><span class="sn-state-badge ${stateClass}">${stateVal}</span></td>
-            <td>${shortDesc}</td>
+            <td><span class="sn-type-badge">CHG</span><a class="sn-link" href="#" data-sysid="${escapeHtml(sysId)}">${escapeHtml(number)}</a>${notesCountBadgeHtml(number)}</td>
+            <td><span class="sn-badge">${escapeHtml(chgType)}</span></td>
+            <td><span class="sn-state-badge ${approvalClass}">${escapeHtml(approvalVal)}</span></td>
+            <td><span class="sn-state-badge ${stateClass}">${escapeHtml(stateVal)}</span></td>
+            <td>${escapeHtml(shortDesc)}</td>
             <td>${scheduleHtml}</td>
             <td>${assignedToHtml}</td>
-            <td>${requestedByName}</td>
+            <td>${escapeHtml(requestedByName)}</td>
           </tr>
         `;
       })
@@ -1986,9 +2237,11 @@
     }
   }
 
-  async function openTicketPreview(sysId, forcedType, explicitTable) {
+  async function openTicketPreview(sysId, forcedType, explicitTable, opts = {}) {
     const token = getAuthToken();
     if (!token) return;
+    // Change requests always get a notes side panel; full workspace (bugs/tasks/notes) when asked for
+    setPreviewWorkspaceMode(!!opts.workspace || forcedType === 'CHG');
 
     const modal = document.getElementById('sn-preview-modal');
     const metaGrid = document.getElementById('sn-modal-meta-grid');
@@ -2044,50 +2297,50 @@
         const approvedByStr = uniqueApprovers.length > 0 ? uniqueApprovers.join(', ') : (approvalStatus.toLowerCase() === 'approved' ? 'Approved (See History)' : 'Pending / None');
 
         const parentService = getFirstAvailable(data, ['business_service', 'u_parent_service', 'parent']) || '—';
-        const childService = getFirstAvailable(data, ['service_offering', 'u_child_service', 'u_sub_service']) || '—';
+        const childService = getFirstAvailable(data, ['u_child_service', 'child_service', 'u_sub_service']) || '—';
         const configItem = getFirstAvailable(data, ['cmdb_ci', 'u_configuration_item']) || '—';
         const groupName = getVal(data.assignment_group) || 'Unassigned Group';
 
         metaGrid.innerHTML = `
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">State & Type</span>
-            <span class="sn-preview-meta-val">${stateType}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(stateType)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Approval Status</span>
-            <span class="sn-preview-meta-val">${approvalStatus}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(approvalStatus)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Requested By</span>
-            <span class="sn-preview-meta-val">${requestedBy}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(requestedBy)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Assigned To</span>
-            <span class="sn-preview-meta-val">${assignedTo}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(assignedTo)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Scheduled Start</span>
-            <span class="sn-preview-meta-val">${schedStart}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(schedStart)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Scheduled End</span>
-            <span class="sn-preview-meta-val">${schedEnd}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(schedEnd)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Approved By</span>
-            <span class="sn-preview-meta-val">${approvedByStr}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(approvedByStr)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Assignment Group</span>
-            <span class="sn-preview-meta-val">${groupName}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(groupName)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Parent / Child Service</span>
-            <span class="sn-preview-meta-val">${parentService} / ${childService}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(parentService)} / ${escapeHtml(childService)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Configuration Item (CI)</span>
-            <span class="sn-preview-meta-val">${configItem}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(configItem)}</span>
           </div>
         `;
 
@@ -2096,8 +2349,19 @@
           assignBtn.innerText = 'Assign to me';
           assignBtn.onclick = async () => {
             await assignToMe(data.sys_id, assignBtn);
-            openTicketPreview(sysId, 'CHG');
+            openTicketPreview(sysId, 'CHG', undefined, opts);
           };
+        }
+
+        {
+          openWorkspacePanel({
+            mode: opts.workspace ? 'full' : 'notes',
+            number: getVal(data.number),
+            sysId: getRawVal(data.sys_id) || sysId,
+            table: 'change_request',
+            prefix: 'CHG',
+            shortDesc: getVal(data.short_description)
+          });
         }
 
         document.getElementById('sn-modal-native-link').onclick = () => {
@@ -2151,7 +2415,7 @@
         const accountName = getFirstAvailable(data, ['account', 'company', 'u_account']) || '—';
         const callerContact = getFirstAvailable(data, ['contact', 'caller_id', 'consumer', 'u_caller', 'opened_by']) || '—';
         const parentService = getFirstAvailable(data, ['business_service', 'u_parent_service', 'product', 'u_product', 'parent']) || '—';
-        const childService = getFirstAvailable(data, ['service_offering', 'u_child_service', 'u_sub_service', 'cmdb_ci']) || '—';
+        const childService = getFirstAvailable(data, ['u_child_service', 'child_service', 'u_sub_service']) || '—';
 
         const stateVal = getVal(data.state) || '—';
         const prioVal = getVal(data.priority) || '—';
@@ -2162,31 +2426,31 @@
         metaGrid.innerHTML = `
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Account</span>
-            <span class="sn-preview-meta-val">${accountName}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(accountName)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Caller / Contact</span>
-            <span class="sn-preview-meta-val">${callerContact}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(callerContact)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Product (Parent / Child Service)</span>
-            <span class="sn-preview-meta-val">${parentService} / ${childService}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(parentService)} / ${escapeHtml(childService)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">State / Priority</span>
-            <span class="sn-preview-meta-val">${stateVal} (Priority: ${prioVal})</span>
+            <span class="sn-preview-meta-val">${escapeHtml(stateVal)} (Priority: ${escapeHtml(prioVal)})</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Assignment Group</span>
-            <span class="sn-preview-meta-val">${groupName}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(groupName)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Assigned To</span>
-            <span class="sn-preview-meta-val">${assignedTo}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(assignedTo)}</span>
           </div>
           <div class="sn-preview-meta-item">
             <span class="sn-preview-meta-label">Opened At</span>
-            <span class="sn-preview-meta-val">${openedAt}</span>
+            <span class="sn-preview-meta-val">${escapeHtml(openedAt)}</span>
           </div>
         `;
 
@@ -2196,8 +2460,18 @@
           assignBtn.innerText = 'Assign to me';
           assignBtn.onclick = async () => {
             await assignToMe(getRawVal(data.sys_id) || sysId, assignBtn);
-            openTicketPreview(sysId, prefix, targetTable);
+            openTicketPreview(sysId, prefix, targetTable, opts);
           };
+        }
+
+        if (opts.workspace) {
+          openWorkspacePanel({
+            number,
+            sysId: getRawVal(data.sys_id) || sysId,
+            table: targetTable,
+            prefix,
+            shortDesc: getVal(data.short_description)
+          });
         }
 
         // Workspace workspace routes expect 'task' for CS and INC records to resolve properly
@@ -2211,6 +2485,10 @@
       console.warn('SN Helper Preview Warning:', err);
       document.getElementById('sn-modal-number').innerText = 'Error';
       document.getElementById('sn-modal-desc').innerText = `Could not load ticket details: ${err.message}`;
+      const wsPanel = document.getElementById('sn-ws-panel');
+      if (wsPanel && !workspaceTicket && wsPanel.style.display !== 'none') {
+        wsPanel.innerHTML = '<div class="sn-muted" style="padding: 8px;">Notes are unavailable because the ticket could not be loaded.</div>';
+      }
     }
   }
 
@@ -2308,7 +2586,8 @@
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function getEnvBadgeClass(label) {
@@ -2718,30 +2997,6 @@
       });
     });
 
-    // Handle Local File clicks
-    grid.querySelectorAll('.sn-launch-link').forEach(a => {
-      a.addEventListener('click', (e) => {
-        if (a.getAttribute('data-local') === 'true') {
-          e.preventDefault();
-          const rawPath = a.getAttribute('data-raw');
-          navigator.clipboard.writeText(rawPath).then(() => {
-            const container = document.getElementById('sn-toast-container');
-            if (container) {
-              const t = document.createElement('div');
-              t.className = 'sn-toast';
-              t.style.borderLeftColor = '#eab308';
-              t.innerHTML = `
-                <div class="sn-toast-header"><span>📁 Local Path Copied!</span></div>
-                <div class="sn-toast-desc">Browsers block direct local file execution from web tabs. Path copied to clipboard:<br><code style="color:#fde047;">${escapeHtml(rawPath)}</code><br>Press <strong>Win + R</strong> and <strong>Ctrl + V</strong> to open immediately.</div>
-              `;
-              container.appendChild(t);
-              setTimeout(() => { if (t.parentNode) t.remove(); }, 7000);
-            }
-          });
-        }
-      });
-    });
-
     grid.querySelectorAll('.sn-copy-link-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -2776,6 +3031,1522 @@
     });
   }
 
+  // =====================================================================
+  // ASSIGNED TO ME • TICKET NOTES & TASKS • KNOWN BUGS
+  // All personal data is stored in this browser (localStorage).
+  // =====================================================================
+  const BUG_STATUS_LABEL = { open: 'Open', fixing: 'Fix in progress', resolved: 'Resolved' };
+  const TASK_REMINDER_CHECK_MS = 15000;
+  const TASK_REMINDER_MAX_LATE_MS = 6 * 60 * 60 * 1000; // don't fire reminders more than 6h late
+  const TASK_DATE_ONLY_REMINDER_HOUR = 9;
+  const BUGS_KEY = 'sn_helper_known_bugs';
+  const TICKET_DATA_KEY = 'sn_helper_ticket_data';
+
+  // The old To-Do list was retired in favour of per-ticket tasks
+  try { localStorage.removeItem('sn_helper_todos'); } catch (e) {}
+
+  function loadStoredJson(key, fallback) {
+    try {
+      const v = JSON.parse(localStorage.getItem(key));
+      return v === null || v === undefined ? fallback : v;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function loadKnownBugs() {
+    const v = loadStoredJson(BUGS_KEY, []);
+    return Array.isArray(v) ? v : [];
+  }
+
+  function loadTicketData() {
+    const v = loadStoredJson(TICKET_DATA_KEY, {});
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  }
+
+  let knownBugs = loadKnownBugs();
+  let ticketData = loadTicketData(); // { [NUMBER]: { sysId, table, prefix, shortDesc, bugIds[], notes[], tasks[] } }
+  let myTickets = [];
+  let myTicketsLoaded = false;
+  let myTicketsError = '';
+  let myTicketsInFlight = false;
+  let liveTicketStates = {}; // NUMBER -> { state, closed }
+  let workspaceTicket = null; // ticket currently open in the pop-up's side panel
+  let mineTypeFilter = localStorage.getItem('sn_helper_mine_type') || 'ALL';
+  let mineBugFilter = localStorage.getItem('sn_helper_mine_bug') || 'ALL';
+  let bugsStatusFilter = localStorage.getItem('sn_helper_bugs_filter') || 'active'; // active | resolved | all
+  let editingBugId = null;
+
+  // ----- small helpers -----
+  function newId(prefix) {
+    return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+  }
+
+  function normNumber(n) {
+    return (getVal(n) || '').trim().toUpperCase();
+  }
+
+  function isClosedTicketState(stateText, activeRaw) {
+    const st = (stateText || '').toLowerCase();
+    return String(activeRaw).toLowerCase() === 'false' || /resolved|closed|cancel|complete/.test(st);
+  }
+
+  function formatTimestamp(ts) {
+    if (!ts) return '—';
+    return new Date(ts).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function showSimpleToast(title, desc, accent, action) {
+    const container = document.getElementById('sn-toast-container');
+    if (!container) return;
+    const t = document.createElement('div');
+    t.className = 'sn-toast';
+    if (accent) t.style.borderLeftColor = accent;
+    t.innerHTML = `
+      <div class="sn-toast-header">
+        <span>${escapeHtml(title)}</span>
+        <button class="sn-toast-close" title="Dismiss">&times;</button>
+      </div>
+      ${desc ? `<div class="sn-toast-desc">${escapeHtml(desc)}</div>` : ''}
+      ${action ? `<div class="sn-toast-cta">${escapeHtml(action.label)}</div>` : ''}
+    `;
+    t.querySelector('.sn-toast-close').addEventListener('click', (e) => {
+      e.stopPropagation();
+      t.remove();
+    });
+    t.addEventListener('click', () => {
+      if (action) action.onClick();
+      t.remove();
+    });
+    container.appendChild(t);
+    setTimeout(() => { if (t.parentNode) t.remove(); }, 8000);
+  }
+
+  function showOverlay() {
+    const overlay = document.getElementById('sn-helper-overlay');
+    const toggleBtn = document.getElementById('sn-helper-toggle');
+    if (overlay && overlay.classList.contains('sn-hidden')) {
+      overlay.classList.remove('sn-hidden');
+      if (toggleBtn) toggleBtn.innerText = 'Hide Support Hub';
+    }
+  }
+
+  // ----- persistence -----
+  function getTicketEntry(number, create) {
+    const n = normNumber(number);
+    if (!n) return null;
+    if (!ticketData[n] && create) ticketData[n] = { bugIds: [], notes: [], tasks: [] };
+    const e = ticketData[n];
+    if (e) {
+      e.bugIds = Array.isArray(e.bugIds) ? e.bugIds : [];
+      e.notes = Array.isArray(e.notes) ? e.notes : [];
+      e.tasks = Array.isArray(e.tasks) ? e.tasks : [];
+    }
+    return e || null;
+  }
+
+  function rememberTicketSnapshot(entry, info) {
+    if (!entry || !info) return;
+    if (info.sysId) entry.sysId = info.sysId;
+    if (info.table) entry.table = info.table;
+    if (info.prefix) entry.prefix = info.prefix;
+    if (info.shortDesc) entry.shortDesc = info.shortDesc;
+  }
+
+  function pruneTicketData() {
+    Object.keys(ticketData).forEach((n) => {
+      const e = ticketData[n];
+      if (!e || (!(e.bugIds || []).length && !(e.notes || []).length && !(e.tasks || []).length)) delete ticketData[n];
+    });
+  }
+
+  function persist(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) {
+      alert('Could not save (browser storage may be full).');
+    }
+  }
+
+  function saveTicketData() {
+    pruneTicketData();
+    persist(TICKET_DATA_KEY, ticketData);
+    afterPersonalDataChange();
+  }
+
+  function saveKnownBugs() {
+    persist(BUGS_KEY, knownBugs);
+    afterPersonalDataChange();
+  }
+
+  function afterPersonalDataChange() {
+    try { applyChangeFiltersAndRender(); } catch (e) {}
+    try { renderUpcomingUserChanges(); } catch (e) {}
+    renderMineHubTile();
+    renderBugsHubTile();
+    if (currentView === 'mine') renderMineTable();
+    if (currentView === 'bugs') renderBugs();
+    if (workspaceTicket) renderWorkspacePanel();
+  }
+
+  function initPersonalDataCrossTabSync() {
+    window.addEventListener('storage', (e) => {
+      if (e.key === TICKET_DATA_KEY) ticketData = loadTicketData();
+      else if (e.key === BUGS_KEY) knownBugs = loadKnownBugs();
+      else return;
+      afterPersonalDataChange();
+    });
+  }
+
+  // ----- tasks: due dates & reminders -----
+  function getTaskDueTime(task) {
+    if (!task.dueDate) return null;
+    const [y, m, d] = task.dueDate.split('-').map(Number);
+    if (!y || !m || !d) return null;
+    if (task.dueTime) {
+      const [hh, mm] = task.dueTime.split(':').map(Number);
+      return new Date(y, m - 1, d, hh || 0, mm || 0).getTime();
+    }
+    return new Date(y, m - 1, d, 23, 59, 59).getTime();
+  }
+
+  function startOfDay(date) {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  }
+
+  // { text, plain, status } where status is overdue | today | soon | later | none
+  function describeTaskDue(task) {
+    const dueTs = getTaskDueTime(task);
+    if (dueTs === null) return { text: 'No due date', plain: 'No due date', status: 'none' };
+    const [y, m, d] = task.dueDate.split('-').map(Number);
+    const dueDay = new Date(y, m - 1, d);
+    const dayDiff = Math.round((startOfDay(dueDay) - startOfDay(new Date())) / 86400000);
+    let dayText;
+    if (dayDiff === 0) dayText = 'Today';
+    else if (dayDiff === 1) dayText = 'Tomorrow';
+    else if (dayDiff === -1) dayText = 'Yesterday';
+    else {
+      dayText = dueDay.toLocaleDateString('en-GB', {
+        weekday: 'short', day: 'numeric', month: 'short',
+        year: dueDay.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined
+      });
+    }
+    const plain = `${dayText}${task.dueTime ? ` ${task.dueTime}` : ''}`;
+    if (dueTs < Date.now()) return { text: `Overdue · ${plain}`, plain, status: 'overdue' };
+    if (dayDiff === 0) return { text: plain, plain, status: 'today' };
+    if (dayDiff === 1) return { text: plain, plain, status: 'soon' };
+    return { text: plain, plain, status: 'later' };
+  }
+
+  function getTaskReminderTime(task) {
+    const reminder = task.reminder ?? '0';
+    if (reminder === 'none' || !task.dueDate) return null;
+    const [y, m, d] = task.dueDate.split('-').map(Number);
+    if (!y || !m || !d) return null;
+    let base;
+    if (task.dueTime) {
+      const [hh, mm] = task.dueTime.split(':').map(Number);
+      base = new Date(y, m - 1, d, hh || 0, mm || 0).getTime();
+    } else {
+      base = new Date(y, m - 1, d, TASK_DATE_ONLY_REMINDER_HOUR, 0).getTime();
+    }
+    return base - (parseInt(reminder, 10) || 0) * 60000;
+  }
+
+  function reminderKey(task) {
+    return `${task.dueDate || ''}|${task.dueTime || ''}|${task.reminder ?? '0'}`;
+  }
+
+  function compareTasks(a, b) {
+    const da = getTaskDueTime(a);
+    const db = getTaskDueTime(b);
+    if (da !== null && db === null) return -1;
+    if (da === null && db !== null) return 1;
+    if (da !== null && db !== null && da !== db) return da - db;
+    return (a.createdAt || 0) - (b.createdAt || 0);
+  }
+
+  function getAllOpenTasks() {
+    const list = [];
+    Object.keys(ticketData).forEach((number) => {
+      (ticketData[number].tasks || []).forEach((t) => {
+        if (!t.done) list.push({ ...t, number });
+      });
+    });
+    return list.sort(compareTasks);
+  }
+
+  function fireTaskReminder(task) {
+    playNotificationSound();
+    const due = describeTaskDue(task);
+    const dueTs = getTaskDueTime(task);
+    const minsToDue = dueTs === null ? null : Math.round((dueTs - Date.now()) / 60000);
+    let header;
+    if (!task.dueTime) header = '⏰ Task due today';
+    else if (minsToDue !== null && minsToDue > 90) header = `⏰ Task due ${due.plain}`;
+    else if (minsToDue !== null && minsToDue > 1) header = `⏰ Task due in ${minsToDue} min`;
+    else if (minsToDue !== null && minsToDue >= -5) header = '⏰ Task due now';
+    else header = '⏰ Task overdue';
+    const when = header.includes('overdue') ? due.text : due.plain;
+
+    const openIt = () => {
+      showOverlay();
+      switchView('mine');
+      openWorkspaceForNumber(task.number);
+    };
+    showSimpleToast(header, `${task.title} — ${when} (${task.number})`, '#a855f7', {
+      label: `Click to open ${task.number} →`,
+      onClick: openIt
+    });
+
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      const n = new Notification(`${header}: ${task.title}`, {
+        body: `${when} • ${task.number}`,
+        tag: `task_${task.id}`
+      });
+      n.onclick = () => {
+        window.focus();
+        openIt();
+        n.close();
+      };
+    }
+  }
+
+  // Only one ServiceNow tab checks at a time, so each reminder fires once
+  function checkTaskReminders() {
+    if (navigator.locks && typeof navigator.locks.request === 'function') {
+      navigator.locks.request('sn_helper_task_reminders', async () => {
+        runTaskReminderCheck();
+      }).catch(() => runTaskReminderCheck());
+    } else {
+      runTaskReminderCheck();
+    }
+  }
+
+  function runTaskReminderCheck() {
+    // Re-read storage so a reminder another tab already fired isn't repeated
+    ticketData = loadTicketData();
+    const now = Date.now();
+    const due = [];
+    let changed = false;
+
+    Object.keys(ticketData).forEach((number) => {
+      (ticketData[number].tasks || []).forEach((t) => {
+        if (t.done) return;
+        const ts = getTaskReminderTime(t);
+        if (ts === null || now < ts) return;
+        const key = reminderKey(t);
+        if (t.reminderFiredKey === key) return;
+        t.reminderFiredKey = key;
+        changed = true;
+        if (now - ts <= TASK_REMINDER_MAX_LATE_MS) due.push({ ...t, number });
+      });
+    });
+
+    if (!changed) return;
+    saveTicketData(); // claim first, then notify
+    due.slice(0, 3).forEach(fireTaskReminder);
+    if (due.length > 3) {
+      showSimpleToast('⏰ More reminders', `${due.length - 3} more task(s) are due. Open Assigned to Me to see them.`, '#a855f7');
+    }
+  }
+
+  // ----- data from ServiceNow -----
+  async function fetchMyTickets() {
+    const token = getAuthToken();
+    if (!token || myTicketsInFlight) return;
+    myTicketsInFlight = true;
+    try {
+      const userId = await resolveCurrentUserId();
+      if (!userId) {
+        myTicketsError = 'Could not identify the current user. Try refreshing the page.';
+        renderMineTable();
+        return;
+      }
+      const fields = 'sys_id,number,priority,state,short_description,assignment_group,opened_at,sys_updated_on,sys_class_name,active';
+      const q = `active=true^assigned_to=${userId}^numberSTARTSWITHCS^numberNOT LIKECSTASK^NQactive=true^assigned_to=${userId}^numberSTARTSWITHINC^ORDERBYDESCsys_updated_on`;
+      const url = `/api/now/table/task?sysparm_query=${encodeURIComponent(q)}&sysparm_limit=500&sysparm_display_value=all&sysparm_fields=${fields}`;
+      const res = await fetch(url, { headers: { 'Accept': 'application/json', 'X-UserToken': token } });
+      if (res.status === 401 || res.status === 403) {
+        myTicketsError = 'Session expired or unauthorized. Please log in or refresh the page.';
+        renderMineTable();
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const rows = (await res.json()).result || [];
+
+      myTickets = rows
+        .map((r) => ({
+          sysId: getRawVal(r.sys_id),
+          number: normNumber(r.number),
+          priority: getVal(r.priority),
+          state: getVal(r.state),
+          stateValue: getRawVal(r.state),
+          active: getRawVal(r.active),
+          shortDesc: getVal(r.short_description),
+          group: getVal(r.assignment_group),
+          opened: getVal(r.opened_at),
+          openedRaw: (r.opened_at && typeof r.opened_at === 'object') ? (r.opened_at.value || '') : '',
+          updated: getVal(r.sys_updated_on),
+          table: getRawVal(r.sys_class_name)
+        }))
+        .filter((t) => t.number && !isClosedTicketState(t.state, t.active));
+
+      // Keep stored snapshots fresh for tickets we hold notes/tasks/bugs on
+      let snapshotChanged = false;
+      myTickets.forEach((t) => {
+        liveTicketStates[t.number] = { state: t.state, closed: false };
+        const e = ticketData[t.number];
+        if (e && (e.shortDesc !== t.shortDesc || e.sysId !== t.sysId)) {
+          rememberTicketSnapshot(e, { sysId: t.sysId, table: t.table, prefix: getTicketPrefix(t.number), shortDesc: t.shortDesc });
+          snapshotChanged = true;
+        }
+      });
+      if (snapshotChanged) persist(TICKET_DATA_KEY, ticketData);
+
+      await ensureStateChoices();
+      await updateOpenSince(myTickets);
+
+      myTicketsLoaded = true;
+      myTicketsError = '';
+    } catch (err) {
+      myTicketsError = `Connection issue (${err.message}). Retrying...`;
+    } finally {
+      myTicketsInFlight = false;
+    }
+    renderMineTable();
+    renderMineHubTile();
+  }
+
+  let liveStateInFlight = false;
+  async function refreshLiveTicketStates() {
+    const token = getAuthToken();
+    if (!token || liveStateInFlight) return;
+    const numbers = Object.keys(ticketData).filter((n) => /^[A-Z]+\d+$/.test(n)).slice(0, 150);
+    if (numbers.length === 0) return;
+    liveStateInFlight = true;
+    try {
+      const url = `/api/now/table/task?sysparm_query=${encodeURIComponent(`numberIN${numbers.join(',')}`)}&sysparm_limit=${numbers.length}&sysparm_display_value=all&sysparm_fields=sys_id,number,state,active,short_description,sys_class_name`;
+      const res = await fetch(url, { headers: { 'Accept': 'application/json', 'X-UserToken': token } });
+      if (!res.ok) return;
+      const rows = (await res.json()).result || [];
+      let snapshotChanged = false;
+      rows.forEach((r) => {
+        const num = normNumber(r.number);
+        if (!num) return;
+        const state = getVal(r.state);
+        liveTicketStates[num] = { state, closed: isClosedTicketState(state, getRawVal(r.active)) };
+        const e = ticketData[num];
+        if (e && (!e.sysId || !e.shortDesc)) {
+          rememberTicketSnapshot(e, { sysId: getRawVal(r.sys_id), table: getRawVal(r.sys_class_name), prefix: getTicketPrefix(num), shortDesc: getVal(r.short_description) });
+          snapshotChanged = true;
+        }
+      });
+      if (snapshotChanged) persist(TICKET_DATA_KEY, ticketData);
+      if (currentView === 'bugs') renderBugs();
+      if (workspaceTicket) renderWorkspacePanel();
+    } catch (e) {
+      console.warn('SN Helper live state warning:', e.message);
+    } finally {
+      liveStateInFlight = false;
+    }
+  }
+
+  // Open the pop-up with the side panel for a ticket number (looks up the sys_id if needed)
+  async function openWorkspaceForNumber(rawNumber) {
+    const number = normNumber(rawNumber);
+    if (!number) return;
+    const mine = myTickets.find((t) => t.number === number);
+    const stored = ticketData[number];
+    const sysId = mine?.sysId || stored?.sysId;
+    const table = mine?.table || stored?.table;
+    const prefix = getTicketPrefix(number);
+    if (sysId) {
+      openTicketPreview(sysId, prefix === 'CHG' ? 'CHG' : prefix, table, { workspace: true });
+      return;
+    }
+    const token = getAuthToken();
+    if (!token) return;
+    try {
+      const url = `/api/now/table/task?sysparm_query=${encodeURIComponent(`number=${number}`)}&sysparm_limit=1&sysparm_display_value=all&sysparm_fields=sys_id,number,sys_class_name`;
+      const res = await fetch(url, { headers: { 'Accept': 'application/json', 'X-UserToken': token } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const rec = ((await res.json()).result || [])[0];
+      if (!rec) {
+        showSimpleToast('Ticket not found', `No ticket found matching "${number}".`, '#f87171');
+        return;
+      }
+      openTicketPreview(getRawVal(rec.sys_id), prefix === 'CHG' ? 'CHG' : prefix, getRawVal(rec.sys_class_name), { workspace: true });
+    } catch (err) {
+      showSimpleToast('Ticket lookup failed', err.message, '#f87171');
+    }
+  }
+
+  // ----- hub tiles -----
+  function renderMineHubTile() {
+    const badge = document.getElementById('sn-hub-mine-count');
+    const preview = document.getElementById('sn-hub-mine-preview');
+    if (!badge || !preview) return;
+
+    const openTasks = getAllOpenTasks();
+    const overdue = openTasks.filter((t) => describeTaskDue(t).status === 'overdue').length;
+    badge.innerText = myTicketsLoaded ? `${myTickets.length} Open` : '…';
+    badge.style.background = overdue > 0 ? '#dc2626' : (myTickets.length > 0 ? '#2563eb' : '#334155');
+
+    if (openTasks.length > 0) {
+      const next = openTasks[0];
+      const due = describeTaskDue(next);
+      const more = openTasks.length - 1;
+      preview.innerHTML = `
+        <div class="sn-tile-label">Next task${overdue > 0 ? ` · <span class="sn-tile-alert">${overdue} overdue</span>` : ''}</div>
+        <div class="sn-tile-title">${escapeHtml(next.title)}</div>
+        <div class="sn-tile-meta">
+          <span class="sn-pill sn-due-${due.status}">${escapeHtml(due.text)}</span>
+          <span class="sn-pill sn-pill-ticket">${escapeHtml(next.number)}</span>
+        </div>
+        ${more > 0 ? `<div class="sn-tile-more">+ ${more} more open task${more === 1 ? '' : 's'}</div>` : ''}
+      `;
+      return;
+    }
+
+    if (!myTicketsLoaded) return;
+    const withBug = myTickets.filter((t) => (ticketData[t.number]?.bugIds || []).length > 0).length;
+    const withNotes = myTickets.filter((t) => (ticketData[t.number]?.notes || []).length > 0).length;
+    preview.innerHTML = myTickets.length === 0
+      ? `<p class="sn-hub-tool-desc">No open CS or INC tickets assigned to you right now. 🎉</p>`
+      : `<p class="sn-hub-tool-desc">${myTickets.length} open ticket${myTickets.length === 1 ? '' : 's'} • ${withBug} linked to a known bug • ${withNotes} with notes. No open tasks.</p>`;
+  }
+
+  function getBugTicketNumbers(bugId) {
+    return Object.keys(ticketData).filter((n) => (ticketData[n].bugIds || []).includes(bugId));
+  }
+
+  function renderBugsHubTile() {
+    const badge = document.getElementById('sn-hub-bugs-count');
+    const preview = document.getElementById('sn-hub-bugs-preview');
+    if (!badge || !preview) return;
+    const active = knownBugs.filter((b) => b.status !== 'resolved');
+    badge.innerText = `${active.length} Active`;
+    badge.style.background = active.length > 0 ? '#b45309' : '#334155';
+
+    if (active.length === 0) {
+      preview.innerHTML = `<p class="sn-hub-tool-desc">Track recurring issues and see every ticket reporting the same bug.</p>`;
+      return;
+    }
+    const top = active
+      .map((b) => ({ b, count: getBugTicketNumbers(b.id).length }))
+      .sort((x, y) => y.count - x.count)
+      .slice(0, 2);
+    preview.innerHTML = `
+      <div class="sn-tile-label">Most reported</div>
+      ${top.map(({ b, count }) => `
+        <div class="sn-tile-bug-row">
+          <span class="sn-tile-bug-title">${escapeHtml(b.title)}</span>
+          <span class="sn-pill sn-pill-count">${count} ticket${count === 1 ? '' : 's'}</span>
+        </div>`).join('')}
+    `;
+  }
+
+
+  // ----- Ticket state categories & "time in open state" -----
+  let mineOpenSort = localStorage.getItem('sn_helper_mine_open_sort') === '1';
+  let stateChoiceLabels = null; // { table: { value: label } } from sys_choice
+  let auditAvailable = null; // null = not tried yet, true = state history readable, false = access denied
+  let openSinceCache = loadStoredJson('sn_helper_open_since', {});
+  if (!openSinceCache || typeof openSinceCache !== 'object' || Array.isArray(openSinceCache)) openSinceCache = {};
+
+  // Out-of-box values, used only if sys_choice can't be read
+  const DEFAULT_STATE_CHOICES = {
+    incident: { 1: 'New', 2: 'In Progress', 3: 'On Hold', 6: 'Resolved', 7: 'Closed', 8: 'Canceled' },
+    sn_customerservice_case: { 1: 'New', 10: 'Open', 18: 'Awaiting Info', 6: 'Resolved', 3: 'Closed', 7: 'Cancelled' }
+  };
+
+  // open = needs work now • hold = parked / waiting on someone else • other = anything else
+  function ticketStateCategory(label) {
+    const st = (label || '').toLowerCase();
+    if (/hold|pending|await|waiting|suspend|deferred/.test(st)) return 'hold';
+    if (/resolved|closed|cancel|complete/.test(st)) return 'other';
+    if (/new|open|progress|active|assigned|work|draft/.test(st)) return 'open';
+    return 'other';
+  }
+
+  function parseServiceNowUtc(str) {
+    if (!str) return null;
+    const d = new Date(String(str).trim().replace(' ', 'T') + 'Z');
+    return isNaN(d.getTime()) ? null : d.getTime();
+  }
+
+  async function ensureStateChoices() {
+    if (stateChoiceLabels) return;
+    stateChoiceLabels = JSON.parse(JSON.stringify(DEFAULT_STATE_CHOICES));
+    const token = getAuthToken();
+    if (!token) return;
+    try {
+      const q = 'nameINincident,sn_customerservice_case,task^element=state^language=en';
+      const res = await fetch(`/api/now/table/sys_choice?sysparm_query=${encodeURIComponent(q)}&sysparm_fields=name,value,label&sysparm_limit=300`, {
+        headers: { 'Accept': 'application/json', 'X-UserToken': token }
+      });
+      if (!res.ok) return;
+      ((await res.json()).result || []).forEach((c) => {
+        const name = getRawVal(c.name);
+        if (!name) return;
+        stateChoiceLabels[name] = stateChoiceLabels[name] || {};
+        stateChoiceLabels[name][getRawVal(c.value)] = getVal(c.label);
+      });
+    } catch (e) {}
+  }
+
+  function stateLabelFor(table, value) {
+    const v = String(value ?? '');
+    const choices = stateChoiceLabels || DEFAULT_STATE_CHOICES;
+    return choices[table]?.[v] ?? choices.task?.[v] ?? '';
+  }
+
+  function isOpenStateValue(table, value) {
+    if (value === '' || value === null || value === undefined) return false;
+    return ticketStateCategory(stateLabelFor(table, value)) === 'open';
+  }
+
+  // Sources, in order: state history (sys_audit) → state metrics (metric_instance) → this browser's own tracking
+  let metricsAvailable = null; // null = not tried yet, true = readable, false = access denied
+  let openSinceDiag = { audit: 'untried', metrics: 'untried' }; // ok | empty | denied | error | untried
+  const OPEN_SINCE_META_KEY = 'sn_helper_open_since_meta';
+  const OPEN_SINCE_RECHECK_MS = 10 * 60 * 1000; // retry remote sources for locally tracked tickets every 10 min
+  const OBSERVED_MAX_GAP_MS = 5 * 60 * 1000; // a change seen within this of the last check counts as exact
+
+  function isLocalOpenSource(src) {
+    return src === 'first-seen' || src === 'observed' || src === 'observed-gap';
+  }
+
+  async function queryAuditOpenSince(list) {
+    const found = {};
+    if (!list.length || auditAvailable === false) return found;
+    try {
+      const ids = list.map((t) => t.sysId).join(',');
+      const q = `documentkeyIN${ids}^fieldname=state^ORDERBYDESCsys_created_on`;
+      const res = await fetch(`/api/now/table/sys_audit?sysparm_query=${encodeURIComponent(q)}&sysparm_fields=documentkey,oldvalue,newvalue,sys_created_on&sysparm_limit=2000`, {
+        headers: { 'Accept': 'application/json', 'X-UserToken': getAuthToken() }
+      });
+      if (res.status === 401 || res.status === 403) {
+        auditAvailable = false;
+        openSinceDiag.audit = 'denied';
+        return found;
+      }
+      if (!res.ok) { openSinceDiag.audit = 'error'; return found; }
+      const rows = (await res.json()).result || [];
+      // No rows at all can mean row-level security is hiding them, so don't treat it as "never changed"
+      if (rows.length === 0) { openSinceDiag.audit = 'empty'; return found; }
+      auditAvailable = true;
+      openSinceDiag.audit = 'ok';
+      const byDoc = {};
+      rows.forEach((a) => {
+        const key = getRawVal(a.documentkey);
+        (byDoc[key] = byDoc[key] || []).push(a);
+      });
+      list.forEach((t) => {
+        const history = (byDoc[t.sysId] || []).sort((x, y) =>
+          (parseServiceNowUtc(getRawVal(y.sys_created_on)) || 0) - (parseServiceNowUtc(getRawVal(x.sys_created_on)) || 0));
+        let since = null;
+        // Walk back through open→open moves (e.g. New → In Progress) to the change that entered the open state
+        for (const a of history) {
+          if (isOpenStateValue(t.table, getRawVal(a.oldvalue))) continue;
+          since = parseServiceNowUtc(getRawVal(a.sys_created_on));
+          break;
+        }
+        if (since !== null) found[t.sysId] = { since, source: 'history' };
+        else if (parseServiceNowUtc(t.openedRaw) !== null) found[t.sysId] = { since: parseServiceNowUtc(t.openedRaw), source: 'opened' };
+      });
+    } catch (e) {
+      openSinceDiag.audit = 'error';
+    }
+    return found;
+  }
+
+  // metric_instance holds one row per period a ticket spent in each state (where a state metric is defined)
+  async function queryMetricsOpenSince(list) {
+    const found = {};
+    if (!list.length || metricsAvailable === false) return found;
+    try {
+      const ids = list.map((t) => t.sysId).join(',');
+      const q = `idIN${ids}^definition.field=state^ORDERBYDESCstart`;
+      const res = await fetch(`/api/now/table/metric_instance?sysparm_query=${encodeURIComponent(q)}&sysparm_fields=id,value,start,end&sysparm_limit=2000`, {
+        headers: { 'Accept': 'application/json', 'X-UserToken': getAuthToken() }
+      });
+      if (res.status === 401 || res.status === 403) {
+        metricsAvailable = false;
+        openSinceDiag.metrics = 'denied';
+        return found;
+      }
+      if (!res.ok) { openSinceDiag.metrics = 'error'; return found; }
+      const rows = (await res.json()).result || [];
+      metricsAvailable = true;
+      const byDoc = {};
+      rows.forEach((m) => {
+        const key = getRawVal(m.id);
+        (byDoc[key] = byDoc[key] || []).push(m);
+      });
+      list.forEach((t) => {
+        const periods = (byDoc[t.sysId] || [])
+          .map((m) => ({ label: getVal(m.value), start: parseServiceNowUtc(getRawVal(m.start)) }))
+          .filter((p) => p.start !== null)
+          .sort((a, b) => b.start - a.start);
+        // The newest period must be the current (open) state, otherwise the metrics are stale for this ticket
+        if (!periods.length || ticketStateCategory(periods[0].label) !== 'open') return;
+        let since = periods[0].start;
+        for (let i = 1; i < periods.length; i++) {
+          if (ticketStateCategory(periods[i].label) !== 'open') break;
+          since = periods[i].start;
+        }
+        found[t.sysId] = { since, source: 'metrics' };
+      });
+      openSinceDiag.metrics = Object.keys(found).length ? 'ok' : 'empty';
+    } catch (e) {
+      openSinceDiag.metrics = 'error';
+    }
+    return found;
+  }
+
+  // Work out when each open ticket last ENTERED an open state (never its age)
+  async function updateOpenSince(tickets) {
+    const now = Date.now();
+    const meta = loadStoredJson(OPEN_SINCE_META_KEY, {}) || {};
+    const lastSeenAt = Number(meta.lastSeenAt) || 0;
+
+    const openTickets = tickets.filter((t) => ticketStateCategory(t.state) === 'open' && t.sysId);
+    const needLookup = openTickets.filter((t) => {
+      const c = openSinceCache[t.sysId];
+      if (!c || c.category !== 'open') return true;
+      if (isLocalOpenSource(c.source)) return now - (c.checkedAt || 0) > OPEN_SINCE_RECHECK_MS;
+      return c.stateValue !== t.stateValue || c.updated !== t.updated;
+    });
+
+    let remaining = needLookup;
+    const fromAudit = await queryAuditOpenSince(remaining);
+    remaining = remaining.filter((t) => !fromAudit[t.sysId]);
+    const fromMetrics = await queryMetricsOpenSince(remaining);
+
+    needLookup.forEach((t) => {
+      const hit = fromAudit[t.sysId] || fromMetrics[t.sysId];
+      if (hit) {
+        openSinceCache[t.sysId] = { stateValue: t.stateValue, updated: t.updated, category: 'open', since: hit.since, source: hit.source, checkedAt: now };
+      }
+    });
+
+    // Own tracking for anything the remote sources couldn't answer
+    openTickets.forEach((t) => {
+      if (fromAudit[t.sysId] || fromMetrics[t.sysId]) return;
+      const c = openSinceCache[t.sysId];
+      if (c && c.category === 'open') {
+        // Already being timed: an open → open move (e.g. New → In Progress) keeps the original time
+        c.stateValue = t.stateValue;
+        c.updated = t.updated;
+        if (needLookup.includes(t)) c.checkedAt = now;
+        return;
+      }
+      if (c && c.category !== 'open') {
+        // We saw it move into an open state
+        const gap = lastSeenAt ? now - lastSeenAt : Infinity;
+        openSinceCache[t.sysId] = gap <= OBSERVED_MAX_GAP_MS
+          ? { stateValue: t.stateValue, updated: t.updated, category: 'open', since: now, source: 'observed', checkedAt: now }
+          : { stateValue: t.stateValue, updated: t.updated, category: 'open', since: now, windowStart: lastSeenAt || null, source: 'observed-gap', checkedAt: now };
+        return;
+      }
+      openSinceCache[t.sysId] = { stateValue: t.stateValue, updated: t.updated, category: 'open', since: now, source: 'first-seen', checkedAt: now };
+    });
+
+    // Remember non-open states so a later move into an open state can be observed
+    tickets.forEach((t) => {
+      const cat = ticketStateCategory(t.state);
+      if (cat !== 'open' && t.sysId) openSinceCache[t.sysId] = { stateValue: t.stateValue, updated: t.updated, category: cat, since: null, source: 'state' };
+    });
+
+    // Drop tickets no longer assigned to you
+    const live = new Set(tickets.map((t) => t.sysId));
+    Object.keys(openSinceCache).forEach((id) => { if (!live.has(id)) delete openSinceCache[id]; });
+    persist('sn_helper_open_since', openSinceCache);
+    persist(OPEN_SINCE_META_KEY, { lastSeenAt: now });
+  }
+
+  function formatDurationShort(ms) {
+    const mins = Math.max(0, Math.floor(ms / 60000));
+    if (mins < 60) return `${mins}m`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ${mins % 60}m`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ${hours % 24}h`;
+  }
+
+  function openAgeHtml(t) {
+    if (ticketStateCategory(t.state) !== 'open') return '';
+    const c = openSinceCache[t.sysId];
+    if (!c || !c.since) return '';
+    const ms = Date.now() - c.since;
+    const heat = ms >= 3 * 86400000 ? 'hot' : (ms >= 86400000 ? 'warm' : 'fresh');
+    const fmt = (ts) => new Date(ts).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const when = fmt(c.since);
+    const why = {
+      history: `In an open state since ${when} (from the ticket's state history)`,
+      metrics: `In an open state since ${when} (from ServiceNow state metrics)`,
+      opened: `In an open state since it was opened, ${when} (no state changes recorded)`,
+      observed: `Seen moving into an open state at ${when} (tracked by this browser)`,
+      'observed-gap': `Moved into an open state sometime between ${c.windowStart ? fmt(c.windowStart) : 'an earlier visit'} and ${when}, while ServiceNow wasn't open. Showing the minimum.`,
+      'first-seen': `At least since ${when}. No state history was available, so this is when this browser first saw it open.`
+    }[c.source] || when;
+    const prefix = c.source === 'first-seen' || c.source === 'observed-gap' ? '≥ ' : '';
+    return `<div class="sn-open-age sn-age-${heat}" title="${escapeHtml(why)}">⏱ ${prefix}${formatDurationShort(ms)}</div>`;
+  }
+
+  function describeOpenSinceDiag(key) {
+    return { ok: 'available', empty: 'no records returned', denied: 'access denied', error: 'request failed', untried: 'not tried' }[key] || key;
+  }
+
+  function renderMineNote() {
+    const note = document.getElementById('sn-mine-note');
+    if (!note) return;
+    const open = myTickets.filter((t) => ticketStateCategory(t.state) === 'open');
+    const sources = open.map((t) => openSinceCache[t.sysId]?.source).filter(Boolean);
+    const localCount = sources.filter(isLocalOpenSource).length;
+    const usedMetrics = sources.includes('metrics');
+    const usedHistory = sources.includes('history') || sources.includes('opened');
+
+    if (localCount > 0) {
+      note.style.display = 'block';
+      note.className = 'sn-mine-note sn-mine-note-warn';
+      note.innerHTML = `⚠️ ServiceNow didn't provide state history for <strong>${localCount}</strong> open ticket${localCount === 1 ? '' : 's'}, so the extension is timing ${localCount === 1 ? 'it' : 'them'} itself in this browser. Times marked <strong>≥</strong> are minimums (from when it first saw the ticket open). Any move into an open state it sees from now on is timed exactly.
+        <div class="sn-mine-note-diag">Tried: state history (<code>sys_audit</code>): ${escapeHtml(describeOpenSinceDiag(openSinceDiag.audit))} • state metrics (<code>metric_instance</code>): ${escapeHtml(describeOpenSinceDiag(openSinceDiag.metrics))}. Read access to either table would give exact times.</div>`;
+      return;
+    }
+    if (mineOpenSort) {
+      const src = usedHistory && usedMetrics ? 'state history and state metrics'
+        : (usedMetrics ? 'ServiceNow state metrics' : 'the ticket state history');
+      note.style.display = 'block';
+      note.className = 'sn-mine-note';
+      note.innerHTML = `⏱ Open tickets first, longest-waiting at the top. Waiting time is measured from when each ticket last moved <strong>into</strong> an open state (from ${src}), not from when it was created. On-hold tickets are listed last.`;
+      return;
+    }
+    note.style.display = 'none';
+  }
+
+  // ----- Assigned to Me page -----
+  function notesCountBadgeHtml(number) {
+    const n = (ticketData[normNumber(number)]?.notes || []).length;
+    if (!n) return '';
+    return ` <span class="sn-pill sn-pill-note sn-notes-count" title="${n} note${n === 1 ? '' : 's'} — open the change to view">📝 ${n}</span>`;
+  }
+
+  function bugChipHtml(bug, removable) {
+    return `<span class="sn-bug-chip sn-bug-chip-${escapeHtml(bug.status || 'open')}" title="${escapeHtml(`${bug.title}${bug.reference ? ` (${bug.reference})` : ''} — ${BUG_STATUS_LABEL[bug.status] || 'Open'}`)}">🐞 <span class="sn-bug-chip-text">${escapeHtml(bug.title)}</span>${removable ? `<button type="button" class="sn-bug-chip-x" data-ws-action="unlink-bug" data-id="${escapeHtml(bug.id)}" title="Unlink this bug">&times;</button>` : ''}</span>`;
+  }
+
+  function notesTasksSummaryHtml(entry) {
+    if (!entry) return '<span class="sn-muted">＋ Add</span>';
+    const notes = (entry.notes || []).length;
+    const tasks = entry.tasks || [];
+    const open = tasks.filter((t) => !t.done).sort(compareTasks);
+    const parts = [];
+    if (notes) parts.push(`<span class="sn-pill sn-pill-note" title="${notes} note${notes === 1 ? '' : 's'}">📝 ${notes}</span>`);
+    if (tasks.length) parts.push(`<span class="sn-pill sn-pill-task" title="${open.length} open of ${tasks.length} task${tasks.length === 1 ? '' : 's'}">☑ ${tasks.length - open.length}/${tasks.length}</span>`);
+    const nextDated = open.find((t) => getTaskDueTime(t) !== null);
+    if (nextDated) {
+      const due = describeTaskDue(nextDated);
+      parts.push(`<span class="sn-pill sn-due-${due.status}" title="${escapeHtml(nextDated.title)}">🕒 ${escapeHtml(due.text)}</span>`);
+    }
+    return parts.length ? parts.join(' ') : '<span class="sn-muted">＋ Add</span>';
+  }
+
+  function updateMineBugFilterOptions() {
+    const sel = document.getElementById('sn-mine-bug');
+    if (!sel) return;
+    if (mineBugFilter.startsWith('bug:') && !knownBugs.some((b) => `bug:${b.id}` === mineBugFilter)) mineBugFilter = 'ALL';
+    const opt = (value, label) => `<option value="${escapeHtml(value)}" ${mineBugFilter === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    const active = knownBugs.filter((b) => b.status !== 'resolved');
+    const resolved = knownBugs.filter((b) => b.status === 'resolved');
+    sel.innerHTML = [
+      opt('ALL', 'All tickets'),
+      opt('ANY', 'Linked to any bug'),
+      opt('NONE', 'Not linked to a bug'),
+      active.length ? `<optgroup label="Active bugs">${active.map((b) => opt(`bug:${b.id}`, b.title)).join('')}</optgroup>` : '',
+      resolved.length ? `<optgroup label="Resolved bugs">${resolved.map((b) => opt(`bug:${b.id}`, b.title)).join('')}</optgroup>` : ''
+    ].join('');
+  }
+
+  function renderMineTable() {
+    const tbody = document.getElementById('sn-mine-body');
+    const statusEl = document.getElementById('sn-mine-status-text');
+    if (!tbody) return;
+    updateMineBugFilterOptions();
+
+    if (statusEl) {
+      if (myTicketsError) statusEl.innerText = myTicketsError;
+      else if (!myTicketsLoaded) statusEl.innerText = 'Loading your tickets...';
+      else statusEl.innerText = `Last updated: ${new Date().toLocaleTimeString()} • ${myTickets.length} open CS/INC ticket(s) assigned to ${getCurrentUserName() || 'you'}`;
+    }
+    if (!myTicketsLoaded) {
+      tbody.innerHTML = `<tr><td colspan="7" class="sn-empty-cell">${escapeHtml(myTicketsError || 'Loading your tickets...')}</td></tr>`;
+      renderMineOther();
+      return;
+    }
+
+    const search = (document.getElementById('sn-mine-search')?.value || '').trim().toLowerCase();
+    const bugsById = Object.fromEntries(knownBugs.map((b) => [b.id, b]));
+    const rows = myTickets.filter((t) => {
+      const prefix = getTicketPrefix(t.number);
+      if (mineTypeFilter !== 'ALL' && prefix !== mineTypeFilter) return false;
+      const ids = (ticketData[t.number]?.bugIds || []).filter((id) => bugsById[id]);
+      if (mineBugFilter === 'ANY' && ids.length === 0) return false;
+      if (mineBugFilter === 'NONE' && ids.length > 0) return false;
+      if (mineBugFilter.startsWith('bug:') && !ids.includes(mineBugFilter.slice(4))) return false;
+      if (search && !`${t.number} ${t.shortDesc}`.toLowerCase().includes(search)) return false;
+      return true;
+    });
+
+    if (mineOpenSort) {
+      const groupRank = { open: 0, other: 1, hold: 2 };
+      const original = new Map(rows.map((t, i) => [t, i]));
+      rows.sort((a, b) => {
+        const ga = groupRank[ticketStateCategory(a.state)];
+        const gb = groupRank[ticketStateCategory(b.state)];
+        if (ga !== gb) return ga - gb;
+        if (ga === 0) {
+          const sa = openSinceCache[a.sysId]?.since ?? Infinity;
+          const sb = openSinceCache[b.sysId]?.since ?? Infinity;
+          if (sa !== sb) return sa - sb; // longest-waiting first; unknown last
+        }
+        return original.get(a) - original.get(b);
+      });
+    }
+    renderMineNote();
+
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" class="sn-empty-cell">${myTickets.length === 0 ? '🎉 No open CS or INC tickets are assigned to you.' : 'No tickets match your filters.'}</td></tr>`;
+      renderMineOther();
+      return;
+    }
+
+    tbody.innerHTML = rows.map((t) => {
+      const entry = ticketData[t.number];
+      const bugs = (entry?.bugIds || []).map((id) => bugsById[id]).filter(Boolean);
+      const prefix = getTicketPrefix(t.number);
+      const prioNum = (t.priority || '').charAt(0);
+      const prioClass = prioNum === '1' || prioNum === '2' ? `sn-priority-${prioNum}` : '';
+      const hasOverdue = (entry?.tasks || []).some((x) => !x.done && describeTaskDue(x).status === 'overdue');
+      return `
+        <tr class="sn-mine-row sn-mine-state-${ticketStateCategory(t.state)} ${hasOverdue ? 'sn-mine-row-alert' : ''}" data-number="${escapeHtml(t.number)}" title="Open ${escapeHtml(t.number)} with notes, tasks &amp; bugs">
+          <td><span class="sn-type-badge">${escapeHtml(prefix)}</span><a class="sn-link" href="#">${escapeHtml(t.number)}</a></td>
+          <td><span class="sn-badge ${prioClass}">${escapeHtml(t.priority || '—')}</span></td>
+          <td><span class="sn-state-badge ${getStateBadgeClass(t.state)}">${escapeHtml(t.state || '—')}</span>${openAgeHtml(t)}</td>
+          <td>${escapeHtml(t.shortDesc)}</td>
+          <td class="sn-mine-bug-cell">${bugs.length ? bugs.map((b) => bugChipHtml(b, false)).join(' ') : '<span class="sn-muted">—</span>'}</td>
+          <td class="sn-mine-nt-cell">${notesTasksSummaryHtml(entry)}</td>
+          <td>${escapeHtml(t.updated)}</td>
+        </tr>
+      `;
+    }).join('');
+    renderMineOther();
+  }
+
+  // Tickets with open tasks that have left your queue (resolved or reassigned)
+  function renderMineOther() {
+    const box = document.getElementById('sn-mine-other');
+    if (!box) return;
+    if (!myTicketsLoaded) { box.innerHTML = ''; return; }
+    const mineSet = new Set(myTickets.map((t) => t.number));
+    const others = Object.keys(ticketData)
+      .filter((n) => !mineSet.has(n) && (ticketData[n].tasks || []).some((t) => !t.done));
+    if (others.length === 0) { box.innerHTML = ''; return; }
+    box.innerHTML = `
+      <div class="sn-mine-other-title">📌 Open tasks on tickets no longer in your queue (resolved or reassigned)</div>
+      <div class="sn-mine-other-list">
+        ${others.map((n) => {
+          const e = ticketData[n];
+          const open = (e.tasks || []).filter((t) => !t.done).length;
+          const live = liveTicketStates[n];
+          return `<button type="button" class="sn-bug-ticket" data-number="${escapeHtml(n)}">
+            <strong>${escapeHtml(n)}</strong>${live?.state ? ` · ${escapeHtml(live.state)}` : ''} — ${escapeHtml(e.shortDesc || 'No description saved')}
+            <span class="sn-pill sn-pill-task">☑ ${open} open</span>
+          </button>`;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  function initMineEvents() {
+    const typeSel = document.getElementById('sn-mine-type');
+    const bugSel = document.getElementById('sn-mine-bug');
+    const search = document.getElementById('sn-mine-search');
+    if (typeSel) {
+      typeSel.value = mineTypeFilter;
+      typeSel.addEventListener('change', () => {
+        mineTypeFilter = typeSel.value;
+        localStorage.setItem('sn_helper_mine_type', mineTypeFilter);
+        renderMineTable();
+      });
+    }
+    if (bugSel) {
+      bugSel.addEventListener('change', () => {
+        mineBugFilter = bugSel.value;
+        localStorage.setItem('sn_helper_mine_bug', mineBugFilter);
+        renderMineTable();
+      });
+    }
+    if (search) search.addEventListener('input', renderMineTable);
+    document.getElementById('sn-mine-refresh-btn')?.addEventListener('click', () => fetchMyTickets());
+    const sortBtn = document.getElementById('sn-mine-open-sort-btn');
+    const syncSortBtn = () => {
+      if (!sortBtn) return;
+      sortBtn.classList.toggle('is-active', mineOpenSort);
+      sortBtn.innerText = mineOpenSort ? '⏱ Open first ✓' : '⏱ Open first';
+    };
+    syncSortBtn();
+    sortBtn?.addEventListener('click', () => {
+      mineOpenSort = !mineOpenSort;
+      localStorage.setItem('sn_helper_mine_open_sort', mineOpenSort ? '1' : '0');
+      syncSortBtn();
+      renderMineTable();
+    });
+    document.getElementById('sn-mine-bugs-btn')?.addEventListener('click', () => switchView('bugs'));
+
+    const openFromEvent = (e) => {
+      const el = e.target.closest('[data-number]');
+      if (!el) return;
+      e.preventDefault();
+      openWorkspaceForNumber(el.getAttribute('data-number'));
+    };
+    document.getElementById('sn-mine-body')?.addEventListener('click', openFromEvent);
+    document.getElementById('sn-mine-other')?.addEventListener('click', openFromEvent);
+  }
+
+  // ----- pop-up side panel (notes, tasks, bugs) -----
+  function setPreviewWorkspaceMode(on) {
+    const card = document.querySelector('#sn-preview-modal .sn-preview-card');
+    const panel = document.getElementById('sn-ws-panel');
+    if (card) card.classList.toggle('sn-workspace', on);
+    if (panel) {
+      panel.style.display = on ? 'flex' : 'none';
+      if (on) panel.innerHTML = '<div class="sn-muted" style="padding: 8px;">Loading notes &amp; tasks...</div>';
+      else panel.innerHTML = '';
+    }
+    if (!on) workspaceTicket = null;
+  }
+
+  function openWorkspacePanel(info) {
+    workspaceTicket = { ...info, number: normNumber(info.number) };
+    const entry = ticketData[workspaceTicket.number];
+    if (entry) {
+      rememberTicketSnapshot(entry, workspaceTicket);
+      persist(TICKET_DATA_KEY, ticketData);
+    }
+    renderWorkspacePanel();
+  }
+
+  function renderWorkspacePanel() {
+    const panel = document.getElementById('sn-ws-panel');
+    if (!panel || !workspaceTicket) return;
+
+    // Keep anything the user is typing and which sections are expanded
+    const kept = {};
+    panel.querySelectorAll('[data-keep]').forEach((el) => { kept[el.id] = el.value; });
+    const openDetails = {};
+    panel.querySelectorAll('details[id]').forEach((d) => { openDetails[d.id] = d.open; });
+    const focusedId = document.activeElement && panel.contains(document.activeElement) ? document.activeElement.id : null;
+
+    const number = workspaceTicket.number;
+    const entry = ticketData[number] || { bugIds: [], notes: [], tasks: [] };
+    const bugsById = Object.fromEntries(knownBugs.map((b) => [b.id, b]));
+    const linked = (entry.bugIds || []).map((id) => bugsById[id]).filter(Boolean);
+    const linkable = knownBugs.filter((b) => !(entry.bugIds || []).includes(b.id));
+    const linkableActive = linkable.filter((b) => b.status !== 'resolved');
+    const linkableResolved = linkable.filter((b) => b.status === 'resolved');
+    const tasks = (entry.tasks || []).slice();
+    const openTasks = tasks.filter((t) => !t.done).sort(compareTasks);
+    const doneTasks = tasks.filter((t) => t.done).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
+    const notes = (entry.notes || []).slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+    const taskRow = (t) => {
+      const due = describeTaskDue(t);
+      const hasReminder = !t.done && getTaskReminderTime(t) !== null;
+      return `
+        <div class="sn-ws-task ${t.done ? 'is-done' : ''} ${!t.done && due.status === 'overdue' ? 'is-overdue' : ''}">
+          <button type="button" class="sn-check ${t.done ? 'is-done' : ''}" data-ws-action="toggle-task" data-id="${escapeHtml(t.id)}" title="${t.done ? 'Mark as not done' : 'Mark as done'}">✓</button>
+          <div class="sn-ws-task-main">
+            <div class="sn-ws-task-title">${escapeHtml(t.title)}</div>
+            ${t.dueDate || t.done ? `<div class="sn-ws-task-meta">
+              ${t.dueDate ? `<span class="sn-pill ${t.done ? 'sn-due-none' : `sn-due-${due.status}`}">🕒 ${escapeHtml(t.done ? due.plain : due.text)}${hasReminder ? ' 🔔' : ''}</span>` : ''}
+              ${t.done ? `<span class="sn-muted">Done ${escapeHtml(formatTimestamp(t.doneAt))}</span>` : ''}
+            </div>` : ''}
+          </div>
+          <button type="button" class="sn-ws-icon-btn" data-ws-action="delete-task" data-id="${escapeHtml(t.id)}" title="Delete task">🗑</button>
+        </div>`;
+    };
+
+    const notesSectionHtml = `
+      <section class="sn-ws-section">
+        <div class="sn-ws-title">📝 Notes <span class="sn-ws-count">${notes.length}</span>
+          ${notes.length ? '<button type="button" class="sn-ws-link" data-ws-action="copy-notes" title="Copy all notes, oldest first — handy for work notes">Copy all</button>' : ''}
+        </div>
+        <div class="sn-ws-stack">
+          <textarea id="sn-ws-note-input" class="sn-links-input" data-keep rows="3" placeholder="Add a note… (Ctrl+Enter to save)"></textarea>
+          <button type="button" class="sn-ws-btn sn-ws-btn-primary" data-ws-action="add-note">Add Note</button>
+        </div>
+        <div class="sn-ws-notes">
+          ${notes.map((n) => `
+            <div class="sn-ws-note">
+              <div class="sn-ws-note-meta">
+                <span>${escapeHtml(formatTimestamp(n.createdAt))}</span>
+                <span>
+                  <button type="button" class="sn-ws-link" data-ws-action="copy-note" data-id="${escapeHtml(n.id)}">Copy</button>
+                  <button type="button" class="sn-ws-link sn-ws-link-danger" data-ws-action="delete-note" data-id="${escapeHtml(n.id)}">Delete</button>
+                </span>
+              </div>
+              <div class="sn-ws-note-text">${escapeHtml(n.text)}</div>
+            </div>`).join('')}
+        </div>
+      </section>
+    `;
+
+    const notesOnlyHtml = `
+      <div class="sn-ws-header">
+        <div class="sn-ws-header-title">📝 Change notes for ${escapeHtml(number)}</div>
+        <div class="sn-muted">Saved privately in this browser • shown wherever you open this change</div>
+      </div>
+      ${notesSectionHtml}
+    `;
+
+    panel.innerHTML = workspaceTicket.mode === 'notes' ? notesOnlyHtml : `
+      <div class="sn-ws-header">
+        <div class="sn-ws-header-title">Your workspace for ${escapeHtml(number)}</div>
+        <div class="sn-muted">Saved privately in this browser</div>
+      </div>
+
+      <section class="sn-ws-section">
+        <div class="sn-ws-title">🐞 Known Bugs <span class="sn-ws-count">${linked.length}</span></div>
+        <div class="sn-ws-chips">${linked.length ? linked.map((b) => bugChipHtml(b, true)).join('') : '<span class="sn-muted">Not linked to a known bug.</span>'}</div>
+        ${linkable.length ? `
+          <div class="sn-ws-row">
+            <select id="sn-ws-bug-select" class="sn-links-input" data-keep>
+              <option value="">Link a known bug…</option>
+              ${linkableActive.length ? `<optgroup label="Active">${linkableActive.map((b) => `<option value="${escapeHtml(b.id)}">${escapeHtml(b.title)}</option>`).join('')}</optgroup>` : ''}
+              ${linkableResolved.length ? `<optgroup label="Resolved">${linkableResolved.map((b) => `<option value="${escapeHtml(b.id)}">${escapeHtml(b.title)}</option>`).join('')}</optgroup>` : ''}
+            </select>
+            <button type="button" class="sn-ws-btn" data-ws-action="link-bug">Link</button>
+          </div>` : ''}
+        <details class="sn-ws-details" id="sn-ws-newbug-details">
+          <summary>＋ Create a new known bug and link it</summary>
+          <div class="sn-ws-stack">
+            <input type="text" id="sn-ws-newbug-title" class="sn-links-input" data-keep placeholder="Bug title *" autocomplete="off" />
+            <input type="text" id="sn-ws-newbug-ref" class="sn-links-input" data-keep placeholder="Reference (e.g. PRB0012345, JIRA-123)" autocomplete="off" />
+            <button type="button" class="sn-ws-btn sn-ws-btn-primary" data-ws-action="create-bug">Create &amp; link</button>
+          </div>
+        </details>
+      </section>
+
+      <section class="sn-ws-section">
+        <div class="sn-ws-title">☑ Tasks <span class="sn-ws-count">${openTasks.length} open</span></div>
+        <div class="sn-ws-tasks">${openTasks.length ? openTasks.map(taskRow).join('') : '<span class="sn-muted">No open tasks.</span>'}</div>
+        <div class="sn-ws-stack sn-ws-add-task">
+          <input type="text" id="sn-ws-task-title" class="sn-links-input" data-keep placeholder="New task… (Enter to add)" autocomplete="off" />
+          <div class="sn-ws-row">
+            <input type="date" id="sn-ws-task-date" class="sn-links-input" data-keep title="Due date" />
+            <input type="time" id="sn-ws-task-time" class="sn-links-input" data-keep title="Due time" />
+          </div>
+          <div class="sn-ws-row">
+            <select id="sn-ws-task-reminder" class="sn-links-input" data-keep title="Reminder (needs a due date; date-only tasks remind at 09:00)">
+              <option value="0">🔔 At due time</option>
+              <option value="15">🔔 15 min before</option>
+              <option value="60">🔔 1 hour before</option>
+              <option value="1440">🔔 1 day before</option>
+              <option value="none">No reminder</option>
+            </select>
+            <button type="button" class="sn-ws-btn sn-ws-btn-primary" data-ws-action="add-task">Add Task</button>
+          </div>
+        </div>
+        ${doneTasks.length ? `
+          <details class="sn-ws-details" id="sn-ws-done-details">
+            <summary>Completed (${doneTasks.length})</summary>
+            <div class="sn-ws-tasks">${doneTasks.map(taskRow).join('')}</div>
+          </details>` : ''}
+      </section>
+
+      ${notesSectionHtml}
+    `;
+
+    Object.keys(kept).forEach((id) => {
+      const el = document.getElementById(id);
+      if (el && kept[id] !== undefined && kept[id] !== '') el.value = kept[id];
+    });
+    Object.keys(openDetails).forEach((id) => {
+      const d = document.getElementById(id);
+      if (d) d.open = openDetails[id];
+    });
+    if (focusedId) document.getElementById(focusedId)?.focus();
+  }
+
+  function copyText(text, btn) {
+    navigator.clipboard.writeText(text).then(() => {
+      if (!btn) return;
+      const orig = btn.innerText;
+      btn.innerText = '✓ Copied';
+      setTimeout(() => { btn.innerText = orig; }, 1500);
+    }).catch(() => alert('Could not copy to clipboard.'));
+  }
+
+  function initWorkspacePanelEvents() {
+    const panel = document.getElementById('sn-ws-panel');
+    if (!panel) return;
+
+    const valueOf = (id) => (document.getElementById(id)?.value || '').trim();
+    const clear = (...ids) => ids.forEach((id) => { const el = document.getElementById(id); if (el) el.value = ''; });
+
+    const addTask = () => {
+      if (!workspaceTicket) return;
+      const title = valueOf('sn-ws-task-title');
+      if (!title) { document.getElementById('sn-ws-task-title')?.focus(); return; }
+      const dueDate = valueOf('sn-ws-task-date');
+      const dueTime = valueOf('sn-ws-task-time');
+      if (dueTime && !dueDate) { alert('Please choose a due date to go with the time.'); return; }
+      const entry = getTicketEntry(workspaceTicket.number, true);
+      rememberTicketSnapshot(entry, workspaceTicket);
+      entry.tasks.push({ id: newId('task'), title, dueDate, dueTime, reminder: valueOf('sn-ws-task-reminder') || '0', done: false, doneAt: null, createdAt: Date.now() });
+      clear('sn-ws-task-title', 'sn-ws-task-date', 'sn-ws-task-time');
+      const rem = document.getElementById('sn-ws-task-reminder');
+      if (rem) rem.value = '0';
+      saveTicketData();
+      document.getElementById('sn-ws-task-title')?.focus();
+    };
+
+    const addNote = () => {
+      if (!workspaceTicket) return;
+      const text = valueOf('sn-ws-note-input');
+      if (!text) { document.getElementById('sn-ws-note-input')?.focus(); return; }
+      const entry = getTicketEntry(workspaceTicket.number, true);
+      rememberTicketSnapshot(entry, workspaceTicket);
+      entry.notes.push({ id: newId('note'), text, createdAt: Date.now() });
+      clear('sn-ws-note-input');
+      saveTicketData();
+    };
+
+    panel.addEventListener('keydown', (e) => {
+      if (e.target.id === 'sn-ws-task-title' && e.key === 'Enter') { e.preventDefault(); addTask(); }
+      if (e.target.id === 'sn-ws-note-input' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addNote(); }
+      if (e.target.id === 'sn-ws-newbug-title' && e.key === 'Enter') { e.preventDefault(); panel.querySelector('[data-ws-action="create-bug"]')?.click(); }
+    });
+
+    panel.addEventListener('click', (e) => {
+      const el = e.target.closest('[data-ws-action]');
+      if (!el || !workspaceTicket) return;
+      e.preventDefault();
+      const action = el.getAttribute('data-ws-action');
+      const id = el.getAttribute('data-id');
+      const number = workspaceTicket.number;
+      const entry = getTicketEntry(number, false);
+
+      if (action === 'add-task') return addTask();
+      if (action === 'add-note') return addNote();
+
+      if (action === 'link-bug') {
+        const bugId = valueOf('sn-ws-bug-select');
+        if (!bugId) return;
+        const e2 = getTicketEntry(number, true);
+        rememberTicketSnapshot(e2, workspaceTicket);
+        if (!e2.bugIds.includes(bugId)) e2.bugIds.push(bugId);
+        clear('sn-ws-bug-select');
+        saveTicketData();
+        return;
+      }
+      if (action === 'create-bug') {
+        const title = valueOf('sn-ws-newbug-title');
+        if (!title) { document.getElementById('sn-ws-newbug-title')?.focus(); return; }
+        const bug = { id: newId('bug'), title, reference: valueOf('sn-ws-newbug-ref'), status: 'open', description: '', workaround: '', createdAt: Date.now(), updatedAt: Date.now() };
+        knownBugs.push(bug);
+        persist(BUGS_KEY, knownBugs);
+        const e2 = getTicketEntry(number, true);
+        rememberTicketSnapshot(e2, workspaceTicket);
+        e2.bugIds.push(bug.id);
+        clear('sn-ws-newbug-title', 'sn-ws-newbug-ref');
+        const d = document.getElementById('sn-ws-newbug-details');
+        if (d) d.open = false;
+        saveTicketData();
+        showSimpleToast('🐞 Known bug created', `"${title}" was linked to ${number}. Add details on the Known Bugs page.`, '#f59e0b');
+        return;
+      }
+      if (!entry) return;
+
+      if (action === 'unlink-bug') {
+        entry.bugIds = entry.bugIds.filter((b) => b !== id);
+        saveTicketData();
+      } else if (action === 'toggle-task') {
+        const t = entry.tasks.find((x) => x.id === id);
+        if (!t) return;
+        t.done = !t.done;
+        t.doneAt = t.done ? Date.now() : null;
+        saveTicketData();
+      } else if (action === 'delete-task') {
+        const t = entry.tasks.find((x) => x.id === id);
+        if (t && confirm(`Delete task "${t.title}"?`)) {
+          entry.tasks = entry.tasks.filter((x) => x.id !== id);
+          saveTicketData();
+        }
+      } else if (action === 'delete-note') {
+        if (confirm('Delete this note?')) {
+          entry.notes = entry.notes.filter((x) => x.id !== id);
+          saveTicketData();
+        }
+      } else if (action === 'copy-note') {
+        const n = entry.notes.find((x) => x.id === id);
+        if (n) copyText(n.text, el);
+      } else if (action === 'copy-notes') {
+        const text = entry.notes.slice()
+          .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+          .map((n) => `[${formatTimestamp(n.createdAt)}]\n${n.text}`)
+          .join('\n\n');
+        copyText(text, el);
+      }
+    });
+  }
+
+  // ----- Known Bugs page -----
+  function bugSummaryText(bug) {
+    const numbers = getBugTicketNumbers(bug.id);
+    const lines = [`Known Bug: ${bug.title}`];
+    if (bug.reference) lines.push(`Reference: ${bug.reference}`);
+    lines.push(`Status: ${BUG_STATUS_LABEL[bug.status] || 'Open'}`);
+    if (bug.description) lines.push('', 'Description:', bug.description);
+    if (bug.workaround) lines.push('', 'Workaround:', bug.workaround);
+    lines.push('', `Affected tickets (${numbers.length}):`);
+    numbers.forEach((n) => {
+      const e = ticketData[n];
+      const live = liveTicketStates[n];
+      lines.push(`- ${n}${e?.shortDesc ? ` — ${e.shortDesc}` : ''}${live?.state ? ` [${live.state}]` : ''}`);
+    });
+    return lines.join('\n');
+  }
+
+  function renderBugs() {
+    const listEl = document.getElementById('sn-bug-list');
+    const filterEl = document.getElementById('sn-bug-filter');
+    if (!listEl) return;
+
+    const counts = {
+      active: knownBugs.filter((b) => b.status !== 'resolved').length,
+      resolved: knownBugs.filter((b) => b.status === 'resolved').length,
+      all: knownBugs.length
+    };
+    if (filterEl) {
+      filterEl.innerHTML = [['active', 'Active'], ['resolved', 'Resolved'], ['all', 'All']]
+        .map(([k, label]) => `<button class="sn-cat-pill ${bugsStatusFilter === k ? 'active' : ''}" data-filter="${k}">${label} (${counts[k]})</button>`)
+        .join('');
+    }
+
+    const search = (document.getElementById('sn-bug-search')?.value || '').trim().toLowerCase();
+    const items = knownBugs
+      .filter((b) => {
+        if (bugsStatusFilter === 'active' && b.status === 'resolved') return false;
+        if (bugsStatusFilter === 'resolved' && b.status !== 'resolved') return false;
+        if (!search) return true;
+        const hay = [b.title, b.reference, b.description, b.workaround, ...getBugTicketNumbers(b.id)].join(' ').toLowerCase();
+        return hay.includes(search);
+      })
+      .map((b) => ({ b, numbers: getBugTicketNumbers(b.id) }))
+      .sort((x, y) => (y.numbers.length - x.numbers.length) || ((y.b.createdAt || 0) - (x.b.createdAt || 0)));
+
+    if (items.length === 0) {
+      listEl.innerHTML = `<div class="sn-empty-box">${knownBugs.length === 0
+        ? 'No known bugs yet. Click <strong>➕ New Known Bug</strong>, or create one from a ticket on the Assigned to Me page.'
+        : 'No bugs match this filter.'}</div>`;
+      return;
+    }
+
+    listEl.innerHTML = items.map(({ b, numbers }) => {
+      const status = b.status || 'open';
+      const openCount = numbers.filter((n) => !liveTicketStates[n]?.closed).length;
+      return `
+        <div class="sn-bug-card sn-bug-card-${escapeHtml(status)}">
+          <div class="sn-bug-top">
+            <span class="sn-bug-title">🐞 ${escapeHtml(b.title)}</span>
+            <span class="sn-pill sn-bug-status-${escapeHtml(status)}">${escapeHtml(BUG_STATUS_LABEL[status] || 'Open')}</span>
+            ${b.reference ? `<span class="sn-pill sn-pill-ref">${escapeHtml(b.reference)}</span>` : ''}
+            <span class="sn-pill sn-pill-count" title="${openCount} still open">${numbers.length} ticket${numbers.length === 1 ? '' : 's'}${numbers.length && openCount !== numbers.length ? ` · ${openCount} open` : ''}</span>
+          </div>
+          ${b.description ? `<p class="sn-bug-desc">${escapeHtml(b.description)}</p>` : ''}
+          ${b.workaround ? `<div class="sn-bug-workaround"><span class="sn-bug-label">Workaround</span>${escapeHtml(b.workaround)}</div>` : ''}
+          <div class="sn-bug-tickets">
+            ${numbers.length ? numbers.map((n) => {
+              const e = ticketData[n];
+              const live = liveTicketStates[n];
+              return `<button type="button" class="sn-bug-ticket ${live?.closed ? 'is-closed' : ''}" data-bug-action="open-ticket" data-number="${escapeHtml(n)}" title="Open ${escapeHtml(n)}">
+                <strong>${escapeHtml(n)}</strong>${live?.state ? ` · ${escapeHtml(live.state)}` : ''}${e?.shortDesc ? ` — ${escapeHtml(e.shortDesc)}` : ''}
+              </button>`;
+            }).join('') : '<span class="sn-muted">No tickets linked yet. Open a ticket from Assigned to Me to link it.</span>'}
+          </div>
+          <div class="sn-bug-footer">
+            <span class="sn-muted">Created ${escapeHtml(formatTimestamp(b.createdAt))}${b.updatedAt && b.updatedAt !== b.createdAt ? ` • Updated ${escapeHtml(formatTimestamp(b.updatedAt))}` : ''}</span>
+            <div class="sn-link-actions">
+              <button class="sn-link-icon-btn" data-bug-action="copy" data-id="${escapeHtml(b.id)}" title="Copy a summary with all affected tickets">📋 Copy summary</button>
+              <button class="sn-link-icon-btn" data-bug-action="edit" data-id="${escapeHtml(b.id)}">Edit</button>
+              <button class="sn-link-icon-btn danger" data-bug-action="delete" data-id="${escapeHtml(b.id)}">Delete</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function initBugsEvents() {
+    const formCard = document.getElementById('sn-bug-form-card');
+    const toggleBtn = document.getElementById('sn-bug-toggle-form-btn');
+    const heading = document.getElementById('sn-bug-form-heading');
+    const saveBtn = document.getElementById('sn-bug-save-btn');
+    const listEl = document.getElementById('sn-bug-list');
+    const f = {
+      title: document.getElementById('sn-bug-title'),
+      reference: document.getElementById('sn-bug-ref'),
+      status: document.getElementById('sn-bug-status'),
+      description: document.getElementById('sn-bug-desc'),
+      workaround: document.getElementById('sn-bug-workaround')
+    };
+    if (!formCard || !listEl) return;
+
+    const openForm = (bug) => {
+      editingBugId = bug ? bug.id : null;
+      f.title.value = bug?.title || '';
+      f.reference.value = bug?.reference || '';
+      f.status.value = bug?.status || 'open';
+      f.description.value = bug?.description || '';
+      f.workaround.value = bug?.workaround || '';
+      heading.innerText = bug ? '✏️ Edit Known Bug' : '🐞 New Known Bug';
+      saveBtn.innerText = bug ? 'Save Changes' : 'Save Bug';
+      formCard.classList.remove('sn-hidden');
+      toggleBtn.innerText = '✕ Close Form';
+      formCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      f.title.focus();
+    };
+    const closeForm = () => {
+      editingBugId = null;
+      Object.values(f).forEach((el) => { el.value = ''; });
+      f.status.value = 'open';
+      formCard.classList.add('sn-hidden');
+      toggleBtn.innerText = '➕ New Known Bug';
+    };
+    const save = () => {
+      const title = f.title.value.trim();
+      if (!title) { alert('Please enter a bug title.'); f.title.focus(); return; }
+      const data = {
+        title,
+        reference: f.reference.value.trim(),
+        status: f.status.value || 'open',
+        description: f.description.value.trim(),
+        workaround: f.workaround.value.trim()
+      };
+      if (editingBugId) {
+        const b = knownBugs.find((x) => x.id === editingBugId);
+        if (b) Object.assign(b, data, { updatedAt: Date.now() });
+      } else {
+        knownBugs.push({ id: newId('bug'), ...data, createdAt: Date.now(), updatedAt: Date.now() });
+      }
+      closeForm();
+      saveKnownBugs();
+    };
+
+    toggleBtn.addEventListener('click', () => (formCard.classList.contains('sn-hidden') ? openForm(null) : closeForm()));
+    document.getElementById('sn-bug-cancel-btn').addEventListener('click', closeForm);
+    saveBtn.addEventListener('click', save);
+    f.title.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); save(); } });
+
+    document.getElementById('sn-bug-filter')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-filter]');
+      if (!btn) return;
+      bugsStatusFilter = btn.getAttribute('data-filter');
+      localStorage.setItem('sn_helper_bugs_filter', bugsStatusFilter);
+      renderBugs();
+    });
+    document.getElementById('sn-bug-search')?.addEventListener('input', renderBugs);
+
+    listEl.addEventListener('click', (e) => {
+      const el = e.target.closest('[data-bug-action]');
+      if (!el) return;
+      e.preventDefault();
+      const action = el.getAttribute('data-bug-action');
+      if (action === 'open-ticket') {
+        openWorkspaceForNumber(el.getAttribute('data-number'));
+        return;
+      }
+      const bug = knownBugs.find((b) => b.id === el.getAttribute('data-id'));
+      if (!bug) return;
+      if (action === 'edit') openForm(bug);
+      else if (action === 'copy') copyText(bugSummaryText(bug), el);
+      else if (action === 'delete') {
+        const n = getBugTicketNumbers(bug.id).length;
+        if (!confirm(`Delete known bug "${bug.title}"?${n ? ` It will be unlinked from ${n} ticket${n === 1 ? '' : 's'}.` : ''}`)) return;
+        knownBugs = knownBugs.filter((b) => b.id !== bug.id);
+        Object.values(ticketData).forEach((entry) => {
+          entry.bugIds = (entry.bugIds || []).filter((id) => id !== bug.id);
+        });
+        if (editingBugId === bug.id) closeForm();
+        persist(BUGS_KEY, knownBugs);
+        saveTicketData();
+      }
+    });
+
+    // Export / import: bugs plus which tickets they're linked to (notes & tasks stay private)
+    document.getElementById('sn-bugs-export-btn')?.addEventListener('click', () => {
+      const links = {};
+      Object.keys(ticketData).forEach((n) => {
+        const e = ticketData[n];
+        if ((e.bugIds || []).length) links[n] = { bugIds: e.bugIds, sysId: e.sysId || '', table: e.table || '', shortDesc: e.shortDesc || '' };
+      });
+      const payload = { type: 'sn-simplifier-known-bugs', version: 1, exportedAt: new Date().toISOString(), bugs: knownBugs, links };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `known-bugs-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    });
+
+    const importInput = document.getElementById('sn-bugs-import-input');
+    document.getElementById('sn-bugs-import-btn')?.addEventListener('click', () => importInput?.click());
+    importInput?.addEventListener('change', async () => {
+      const file = importInput.files && importInput.files[0];
+      importInput.value = '';
+      if (!file) return;
+      try {
+        const data = JSON.parse(await file.text());
+        if (!data || data.type !== 'sn-simplifier-known-bugs' || !Array.isArray(data.bugs)) throw new Error('This file is not a Known Bugs export.');
+        let added = 0;
+        let updated = 0;
+        let linked = 0;
+        data.bugs.forEach((b) => {
+          if (!b || !b.id || !b.title) return;
+          const clean = {
+            id: String(b.id), title: String(b.title), reference: String(b.reference || ''),
+            status: ['open', 'fixing', 'resolved'].includes(b.status) ? b.status : 'open',
+            description: String(b.description || ''), workaround: String(b.workaround || ''),
+            createdAt: Number(b.createdAt) || Date.now(), updatedAt: Number(b.updatedAt) || Date.now()
+          };
+          const existing = knownBugs.find((x) => x.id === clean.id);
+          if (!existing) { knownBugs.push(clean); added++; }
+          else if ((clean.updatedAt || 0) > (existing.updatedAt || 0)) { Object.assign(existing, clean); updated++; }
+        });
+        const validIds = new Set(knownBugs.map((b) => b.id));
+        Object.keys(data.links || {}).forEach((num) => {
+          const link = data.links[num] || {};
+          const ids = (Array.isArray(link.bugIds) ? link.bugIds : []).map(String).filter((id) => validIds.has(id));
+          if (!ids.length || !/^[A-Za-z]+\d+$/.test(num)) return;
+          const entry = getTicketEntry(num, true);
+          rememberTicketSnapshot(entry, { sysId: String(link.sysId || ''), table: String(link.table || ''), shortDesc: String(link.shortDesc || '') });
+          ids.forEach((id) => { if (!entry.bugIds.includes(id)) { entry.bugIds.push(id); linked++; } });
+        });
+        persist(BUGS_KEY, knownBugs);
+        saveTicketData();
+        refreshLiveTicketStates();
+        showSimpleToast('⬆ Known Bugs imported', `${added} new, ${updated} updated, ${linked} ticket link(s) added.`, '#22c55e');
+      } catch (err) {
+        alert(`Import failed: ${err.message}`);
+      }
+    });
+  }
+
   function getStateBadgeClass(stateText) {
     if (!stateText) return 'state-default';
     const clean = stateText.toLowerCase().trim();
@@ -2801,11 +4572,45 @@
     return 'state-default';
   }
 
+  // Shrinks the hub to fit the screen height (down to MIN_SCALE) so smaller displays
+  // see the whole hub without scrolling. Below that it scrolls, starting from the top.
+  function setupHubAutoScale() {
+    const area = document.querySelector('.sn-hub-main-area');
+    const wrapper = document.getElementById('sn-hub-wrapper');
+    if (!area || !wrapper || typeof ResizeObserver === 'undefined') return;
+
+    const MIN_SCALE = 0.7;
+    const STACKED_LAYOUT_MAX_WIDTH = 1100; // matches the @media rule in styles.css
+    let frame = null;
+
+    const fit = () => {
+      frame = null;
+      wrapper.style.zoom = '';
+      if (window.innerWidth <= STACKED_LAYOUT_MAX_WIDTH || area.clientHeight === 0) return;
+
+      const cs = getComputedStyle(area);
+      const availableHeight = area.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+      const naturalHeight = wrapper.offsetHeight;
+      if (naturalHeight > availableHeight) {
+        wrapper.style.zoom = Math.max(MIN_SCALE, availableHeight / naturalHeight).toFixed(3);
+      }
+    };
+
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(fit);
+    };
+
+    new ResizeObserver(schedule).observe(area);
+    window.addEventListener('resize', schedule);
+    schedule();
+  }
+
   function init() {
     const checkExist = setInterval(() => {
       if (getAuthToken() && document.body) {
         clearInterval(checkExist);
         buildUI();
+        setupHubAutoScale();
         fetchTickets();
         fetchChanges();
         keepSessionAlive();
@@ -2814,7 +4619,14 @@
           fetchTickets();
           fetchChanges();
           keepSessionAlive();
+          fetchMyTickets();
+          if (currentView === 'bugs') refreshLiveTicketStates();
+          renderMineHubTile();
         }, POLL_INTERVAL_MS);
+        fetchMyTickets();
+        checkTaskReminders();
+        setInterval(checkTaskReminders, TASK_REMINDER_CHECK_MS);
+        initPersonalDataCrossTabSync();
         setInterval(checkForExtensionUpdate, UPDATE_CHECK_INTERVAL_MS);
       }
     }, 1500);
