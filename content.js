@@ -1,17 +1,292 @@
 (function () {
-  // When this file runs in the extension's ISOLATED world (second manifest entry), it can read
-  // the real manifest version. Publish it on <html> for the MAIN-world copy to read, then stop.
+  // This one file plays four parts (kept in one file so the updater only needs content.js, styles.css and manifest.json):
+  //  1. the extension's background service worker (no page): turns password-reset detection on/off
+  //  2. the ISOLATED-world copy on WLUK pages: publishes the real version for the hub, and lets the hub
+  //     reach the extension's storage (Password Expiry data is shared with the reset-page bar)
+  //  3. the ISOLATED-world copy on other sites, only once reset detection is turned on: the
+  //     "did you reset this password?" bar on an account's reset page
+  //  4. the MAIN-world copy on WLUK pages: the Support Hub (everything after this block)
+  if (typeof document === 'undefined') {
+    snBackground();
+    return;
+  }
   try {
     if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.getManifest === 'function') {
-      document.documentElement.setAttribute('data-sn-simplifier-version', chrome.runtime.getManifest().version);
+      if (window.top === window.self) {
+        if (location.hostname === 'wluk.service-now.com') {
+          document.documentElement.setAttribute('data-sn-simplifier-version', chrome.runtime.getManifest().version);
+          snStorageBridge();
+        }
+        snResetDetector();
+      }
       return;
     }
   } catch (e) {}
 
+  // =====================================================================
+  // Password Expiry: shared helpers (used by the hub and by the reset-page bar)
+  // No passwords are ever stored: only account names, optional usernames, dates, links and steps.
+  // =====================================================================
+  function pwToday() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  // Does this address belong to the account's reset page? ('site' = anywhere on that website, 'page' = that page and below)
+  function pwUrlMatches(acc, href) {
+    if (!acc || !acc.resetUrl || acc.detect === 'off') return false;
+    let target;
+    let here;
+    try { target = new URL(acc.resetUrl); here = new URL(href); } catch (e) { return false; }
+    const host = (h) => String(h || '').toLowerCase().replace(/^www\./, '');
+    if (!host(target.hostname) || host(target.hostname) !== host(here.hostname)) return false;
+    if (acc.detect === 'page') {
+      const path = (u) => decodeURIComponent(u.pathname).replace(/\/+$/, '').toLowerCase();
+      return path(here) === path(target) || path(here).startsWith(`${path(target)}/`);
+    }
+    return true;
+  }
+
+  function pwDueInfo(acc) {
+    if (!acc.lastChanged) return { status: 'unknown', daysLeft: null, due: null };
+    const days = Number(acc.expiryDays);
+    if (!days || days <= 0) return { status: 'none', daysLeft: null, due: null };
+    const [y, m, d] = acc.lastChanged.split('-').map(Number);
+    const due = new Date(y, m - 1, d + days);
+    const t = new Date();
+    const today = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+    const daysLeft = Math.round((due - today) / 86400000);
+    const warn = Number(acc.warnDays ?? 14) || 0;
+    const status = daysLeft < 0 ? 'overdue' : daysLeft === 0 ? 'today' : daysLeft <= warn ? 'soon' : 'ok';
+    return { status, daysLeft, due };
+  }
+
+  // ----- 1. Background service worker -----
+  function snBackground() {
+    const DETECTOR_ID = 'sn-pw-reset-detector';
+    const ALL_SITES = ['<all_urls>'];
+    const hasAccess = async () => { try { return await chrome.permissions.contains({ origins: ALL_SITES }); } catch (e) { return false; } };
+    const isRegistered = async () => { try { return (await chrome.scripting.getRegisteredContentScripts({ ids: [DETECTOR_ID] })).length > 0; } catch (e) { return false; } };
+    const accessPageExists = async () => { try { return (await fetch(chrome.runtime.getURL('password-access.html'))).ok; } catch (e) { return false; } };
+
+    // Keep the reset-page script registered exactly when detection is on and access to all sites is allowed
+    async function sync() {
+      const { pwDetect } = await chrome.storage.local.get('pwDetect');
+      const access = await hasAccess();
+      const want = !!(pwDetect && pwDetect.enabled) && access;
+      const registered = await isRegistered();
+      if (want && !registered) {
+        await chrome.scripting.registerContentScripts([{
+          id: DETECTOR_ID, matches: ['<all_urls>'], excludeMatches: ['https://wluk.service-now.com/*'],
+          js: ['content.js'], runAt: 'document_idle', persistAcrossSessions: true
+        }]);
+      }
+      if (!want && registered) await chrome.scripting.unregisterContentScripts({ ids: [DETECTOR_ID] });
+      if (pwDetect && pwDetect.enabled && !access) await chrome.storage.local.set({ pwDetect: { enabled: false, at: Date.now(), reason: 'access-removed' } });
+      return want;
+    }
+
+    async function status() {
+      const { pwDetect } = await chrome.storage.local.get('pwDetect');
+      return { enabled: !!(pwDetect && pwDetect.enabled), access: await hasAccess(), registered: await isRegistered(), pageAvailable: await accessPageExists() };
+    }
+
+    chrome.runtime.onInstalled.addListener(() => { sync().catch(() => {}); });
+    chrome.runtime.onStartup.addListener(() => { sync().catch(() => {}); });
+    if (chrome.permissions && chrome.permissions.onRemoved) chrome.permissions.onRemoved.addListener(() => { sync().catch(() => {}); });
+
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (!msg || sender.id !== chrome.runtime.id) return undefined;
+      const run = (fn) => { fn().then(sendResponse, (e) => sendResponse({ ok: false, error: String((e && e.message) || e) })); return true; };
+      if (msg.type === 'pw-status') return run(status);
+      if (msg.type === 'pw-open-access') {
+        return run(async () => {
+          if (!(await accessPageExists())) return { ok: false, error: 'missing-page' };
+          await chrome.tabs.create({ url: chrome.runtime.getURL('password-access.html') });
+          return { ok: true };
+        });
+      }
+      if (msg.type === 'pw-enabled') {
+        return run(async () => {
+          await chrome.storage.local.set({ pwDetect: { enabled: true, at: Date.now() } });
+          return { ok: await sync() };
+        });
+      }
+      if (msg.type === 'pw-disable') {
+        return run(async () => {
+          await chrome.storage.local.set({ pwDetect: { enabled: false, at: Date.now() } });
+          await sync();
+          try { await chrome.permissions.remove({ origins: ALL_SITES }); } catch (e) { /* already gone */ }
+          return { ok: true };
+        });
+      }
+      return undefined;
+    });
+  }
+
+  // ----- 2. Storage bridge for the hub (ISOLATED world, WLUK pages) -----
+  // Only Password Expiry keys ("pw…") can be read or written through it.
+  function snStorageBridge() {
+    const allowed = (k) => typeof k === 'string' && /^pw[A-Z]/.test(k);
+    window.addEventListener('message', (event) => {
+      if (event.source !== window) return;
+      const m = event.data;
+      if (!m || m.__snsimp !== 'req' || typeof m.id !== 'string') return;
+      const reply = (payload) => window.postMessage(Object.assign({ __snsimp: 'res', id: m.id }, payload), location.origin);
+      (async () => {
+        try {
+          if (m.op === 'get') {
+            reply({ ok: true, data: await chrome.storage.local.get((m.keys || []).filter(allowed)) });
+          } else if (m.op === 'set') {
+            const items = {};
+            Object.keys(m.items || {}).filter(allowed).forEach((k) => { items[k] = m.items[k]; });
+            await chrome.storage.local.set(items);
+            reply({ ok: true });
+          } else if (m.op === 'pw-status' || m.op === 'pw-open-access' || m.op === 'pw-disable') {
+            reply({ ok: true, data: await chrome.runtime.sendMessage({ type: m.op }) });
+          } else {
+            reply({ ok: false, error: 'unknown-op' });
+          }
+        } catch (e) {
+          reply({ ok: false, error: String((e && e.message) || e) });
+        }
+      })();
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      const keys = Object.keys(changes).filter(allowed);
+      if (keys.length) window.postMessage({ __snsimp: 'changed', keys }, location.origin);
+    });
+  }
+
+  // ----- 3. Reset-page bar (ISOLATED world, any site, only while detection is on) -----
+  function snResetDetector() {
+    const STATE_KEY = 'sn-simplifier-pw-bar';
+    let host = null;
+    let lastHref = '';
+    let confirmingUntil = 0; // keep the "Updated" message up for a moment
+
+    const tabState = () => { try { return JSON.parse(sessionStorage.getItem(STATE_KEY) || '{}'); } catch (e) { return {}; } };
+    const saveTabState = (st) => { try { sessionStorage.setItem(STATE_KEY, JSON.stringify(st)); } catch (e) { /* ignore */ } };
+    const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    function remove() { if (host) { host.remove(); host = null; } }
+
+    async function check() {
+      lastHref = location.href;
+      if (Date.now() < confirmingUntil) return;
+      let data;
+      try { data = await chrome.storage.local.get(['pwAccounts', 'pwDetect']); } catch (e) { remove(); return; }
+      if (!data.pwDetect || !data.pwDetect.enabled) { remove(); return; }
+      const st = tabState();
+      const today = pwToday();
+      const matches = (data.pwAccounts || []).filter((a) => pwUrlMatches(a, location.href) && !(st.done || []).includes(a.id) && a.lastChanged !== today);
+      if (!matches.length || st.hidden) { remove(); return; }
+      render(matches, st.pill ? 'pill' : 'bar');
+    }
+
+    async function markReset(ids) {
+      const { pwAccounts } = await chrome.storage.local.get('pwAccounts');
+      const list = Array.isArray(pwAccounts) ? pwAccounts : [];
+      const today = pwToday();
+      const names = [];
+      list.forEach((a) => {
+        if (!ids.includes(a.id)) return;
+        a.lastChanged = today;
+        a.history = [{ date: today, how: 'detected' }, ...(a.history || [])].slice(0, 20);
+        a.updatedAt = Date.now();
+        const due = pwDueInfo(a);
+        names.push(`${a.name}${due.due ? ` (next change due ${due.due.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })})` : ''}`);
+      });
+      await chrome.storage.local.set({ pwAccounts: list });
+      const st = tabState();
+      st.done = [...new Set([...(st.done || []), ...ids])];
+      saveTabState(st);
+      return names;
+    }
+
+    function render(accounts, mode) {
+      if (!host) {
+        host = document.createElement('div');
+        host.setAttribute('data-sn-simplifier', 'pw-bar');
+        host.style.cssText = 'all: initial; position: fixed; z-index: 2147483647; top: 0; left: 0; width: 0; height: 0;';
+        host.attachShadow({ mode: 'open' });
+        (document.body || document.documentElement).appendChild(host);
+      }
+      const root = host.shadowRoot;
+      const who = (a) => `<strong>${esc(a.name)}</strong>${a.username ? ` <span class="u">(${esc(a.username)})</span>` : ''}`;
+      const css = `
+        * { box-sizing: border-box; font-family: 'Segoe UI', system-ui, sans-serif; }
+        .bar { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); width: min(720px, calc(100vw - 24px)); background: #0f172a; color: #e2e8f0;
+          border: 1px solid #334155; border-left: 4px solid #f59e0b; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,.45); padding: 12px 14px; font-size: 14px; line-height: 1.4; }
+        .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .msg { flex: 1; min-width: 220px; }
+        .u { color: #94a3b8; font-weight: 400; }
+        .sub { color: #94a3b8; font-size: 12px; margin-top: 2px; }
+        .acc { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; border-top: 1px solid #1e293b; }
+        button { font: inherit; font-size: 13px; border-radius: 6px; padding: 6px 12px; cursor: pointer; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; }
+        button.yes { background: #16a34a; border-color: #16a34a; color: #fff; font-weight: 600; }
+        button.x { background: transparent; border: none; color: #94a3b8; font-size: 18px; padding: 2px 6px; }
+        .done { border-left-color: #22c55e; }
+        .pill { position: fixed; right: 16px; bottom: 16px; background: #0f172a; color: #fde68a; border: 1px solid #f59e0b; border-radius: 999px;
+          padding: 8px 14px; font-size: 13px; font-weight: 600; box-shadow: 0 8px 24px rgba(0,0,0,.4); cursor: pointer; }`;
+      if (mode === 'pill') {
+        root.innerHTML = `<style>${css}</style><button class="pill" data-a="expand" title="SNOW Simplifier: did you reset a password here?">🔑 Password reset done?</button>`;
+      } else if (accounts.length === 1) {
+        const a = accounts[0];
+        root.innerHTML = `<style>${css}</style><div class="bar" role="dialog" aria-label="Password reset detected"><div class="row">
+          <span style="font-size:18px">🔑</span>
+          <div class="msg">Password reset page for ${who(a)}. Did you reset its password?<div class="sub">SNOW Simplifier · Yes records today as the date it was last changed.</div></div>
+          <button class="yes" data-a="yes" data-id="${esc(a.id)}">Yes, I reset it</button>
+          <button data-a="later">Not yet</button>
+          <button class="x" data-a="hide" title="Don't ask again on this tab">×</button>
+        </div></div>`;
+      } else {
+        root.innerHTML = `<style>${css}</style><div class="bar" role="dialog" aria-label="Password reset detected"><div class="row">
+          <span style="font-size:18px">🔑</span>
+          <div class="msg">Password reset page for ${accounts.length} of your accounts. Which did you reset?<div class="sub">SNOW Simplifier · Yes records today as the date it was last changed.</div></div>
+          <button data-a="later">Not yet</button>
+          <button class="x" data-a="hide" title="Don't ask again on this tab">×</button>
+        </div>
+        ${accounts.map((a) => `<div class="acc"><span>${who(a)}</span><button class="yes" data-a="yes" data-id="${esc(a.id)}">Yes, I reset it</button></div>`).join('')}</div>`;
+      }
+      root.querySelectorAll('[data-a]').forEach((btn) => btn.addEventListener('click', async () => {
+        const action = btn.getAttribute('data-a');
+        const st = tabState();
+        if (action === 'expand') { st.pill = false; saveTabState(st); check(); return; }
+        if (action === 'later') { st.pill = true; saveTabState(st); check(); return; }
+        if (action === 'hide') { st.hidden = true; saveTabState(st); remove(); return; }
+        if (action === 'yes') {
+          btn.disabled = true;
+          if (accounts.length === 1) confirmingUntil = Date.now() + 5000; // the save below triggers a re-check
+          let names;
+          try { names = await markReset([btn.getAttribute('data-id')]); } catch (e) { confirmingUntil = 0; btn.disabled = false; return; }
+          const bar = root.querySelector('.bar');
+          if (bar && accounts.length === 1) {
+            confirmingUntil = Date.now() + 5000;
+            bar.classList.add('done');
+            bar.innerHTML = `<div class="row"><span style="font-size:18px">✅</span><div class="msg">Updated: ${esc(names.join(', '))}.<div class="sub">SNOW Simplifier</div></div></div>`;
+            setTimeout(() => { confirmingUntil = 0; check(); }, 5000);
+          } else {
+            check();
+          }
+        }
+      }));
+    }
+
+    check();
+    setInterval(() => { if (location.href !== lastHref) check(); }, 1500);
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && (changes.pwAccounts || changes.pwDetect)) check();
+      });
+    } catch (e) { /* extension reloaded */ }
+  }
+
   if (window.top !== window.self) return;
 
   // Version & GitHub Auto-Check Config
-  const FALLBACK_VERSION = '1.0.6'; // Only used if the manifest version can't be read
+  const FALLBACK_VERSION = '1.1.0'; // Only used if the manifest version can't be read
   const GITHUB_API_MANIFEST_URL = 'https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/manifest.json?ref=main';
   const GITHUB_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
 
@@ -517,7 +792,8 @@
       changes: document.getElementById('sn-view-changes'),
       links: document.getElementById('sn-view-links'),
       mine: document.getElementById('sn-view-mine'),
-      bugs: document.getElementById('sn-view-bugs')
+      bugs: document.getElementById('sn-view-bugs'),
+      passwords: document.getElementById('sn-view-passwords')
     };
 
     // Fall back to the hub if a saved view no longer exists (e.g. the removed Notes / To-Do pages)
@@ -540,6 +816,10 @@
     if (currentView === 'bugs') {
       renderBugs();
       refreshLiveTicketStates();
+    }
+    if (currentView === 'passwords') {
+      renderPasswords();
+      loadPwData().then(() => refreshPwStatus());
     }
   }
 
@@ -645,6 +925,16 @@
                 </div>
                 <div class="sn-tile-preview" id="sn-hub-bugs-preview">
                   <p class="sn-hub-tool-desc">Track recurring issues and see every ticket reporting the same bug.</p>
+                </div>
+              </div>
+
+              <div class="sn-hub-tool-card" id="sn-go-passwords">
+                <div class="sn-hub-tool-top">
+                  <h4 class="sn-hub-tool-title">🔑 Password Expiry</h4>
+                  <span class="sn-hub-badge" id="sn-hub-pw-count" style="background: #334155;">…</span>
+                </div>
+                <div class="sn-tile-preview" id="sn-hub-pw-preview">
+                  <p class="sn-hub-tool-desc">Track when your account passwords were last changed and when they expire. No passwords are stored.</p>
                 </div>
               </div>
 
@@ -1046,6 +1336,89 @@
           <div class="sn-bug-list" id="sn-bug-list"></div>
         </div>
       </div>
+
+      <!-- 8. PASSWORD EXPIRY VIEW -->
+      <div id="sn-view-passwords" class="sn-view-section sn-view-hidden">
+        <div class="sn-header">
+          <div class="sn-title-area">
+            <div class="sn-title-row">
+              <button class="sn-back-hub-btn" id="sn-pw-back-btn">← Support Hub</button>
+              <h1>Password Expiry</h1>
+            </div>
+            <div class="sn-status-bar">No passwords are ever stored: just when each was last changed, when it expires and how to reset it</div>
+          </div>
+        </div>
+
+        <div class="sn-links-container">
+          <div class="sn-pw-detect" id="sn-pw-detect"></div>
+
+          <div class="sn-links-top-actions">
+            <button class="sn-btn sn-btn-primary" id="sn-pw-toggle-form-btn" style="margin-top: 0;">➕ Add account</button>
+            <div class="sn-links-categories" id="sn-pw-filter"></div>
+            <div class="sn-bug-toolbar-right">
+              <input type="text" id="sn-pw-search" class="sn-links-input" style="max-width: 220px;" placeholder="🔍 Filter accounts..." autocomplete="off" />
+              <button class="sn-btn" id="sn-pw-export-btn" style="margin-top: 0; background: #334155; font-size: 12px;">⬇ Export</button>
+              <button class="sn-btn" id="sn-pw-import-btn" style="margin-top: 0; background: #334155; font-size: 12px;">⬆ Import</button>
+              <input type="file" id="sn-pw-import-input" accept=".json" style="display: none;" />
+            </div>
+          </div>
+
+          <div class="sn-links-form-card sn-hidden" id="sn-pw-form-card">
+            <div class="sn-links-form-title">
+              <span id="sn-pw-form-heading">🔑 Add account</span>
+            </div>
+            <div class="sn-form-grid sn-bug-form-grid">
+              <label class="sn-form-field sn-span-2">
+                <span>Account name *</span>
+                <input type="text" id="sn-pw-name" class="sn-links-input" placeholder="e.g. Darwin admin (PROD)" autocomplete="off" />
+              </label>
+              <label class="sn-form-field">
+                <span>System / website</span>
+                <input type="text" id="sn-pw-system" class="sn-links-input" placeholder="e.g. Darwin, AD, VPN" autocomplete="off" />
+              </label>
+              <label class="sn-form-field">
+                <span>Username (optional)</span>
+                <input type="text" id="sn-pw-username" class="sn-links-input" placeholder="Never the password" autocomplete="off" />
+              </label>
+              <label class="sn-form-field">
+                <span>Password last changed</span>
+                <input type="date" id="sn-pw-last" class="sn-links-input" />
+              </label>
+              <label class="sn-form-field">
+                <span>Expires every (days)</span>
+                <input type="number" id="sn-pw-expiry" class="sn-links-input" min="1" placeholder="Blank = never" />
+              </label>
+              <label class="sn-form-field">
+                <span>Warn me (days before)</span>
+                <input type="number" id="sn-pw-warn" class="sn-links-input" min="0" />
+              </label>
+              <label class="sn-form-field sn-span-2">
+                <span>Reset page link</span>
+                <input type="url" id="sn-pw-url" class="sn-links-input" placeholder="https://…" autocomplete="off" />
+              </label>
+              <label class="sn-form-field">
+                <span>Spot visits to the reset page</span>
+                <select id="sn-pw-detect-mode" class="sn-links-input">
+                  <option value="site">Anywhere on that website</option>
+                  <option value="page">That page only</option>
+                  <option value="off">Don't spot it</option>
+                </select>
+              </label>
+              <label class="sn-form-field sn-span-full">
+                <span>How to reset it (steps)</span>
+                <textarea id="sn-pw-steps" class="sn-links-input" rows="3" placeholder="e.g. Log in to the jump box, press Ctrl+Alt+End, Change a password…"></textarea>
+              </label>
+            </div>
+            <div class="sn-pw-form-note">Don't enter passwords here. Only the details above are saved, in this browser's extension storage.</div>
+            <div class="sn-form-actions">
+              <button class="sn-link-icon-btn" id="sn-pw-cancel-btn" style="padding: 8px 14px; font-size: 12px;">Cancel</button>
+              <button class="sn-btn sn-btn-primary" id="sn-pw-save-btn" style="margin-top: 0; padding: 9px 20px;">Save account</button>
+            </div>
+          </div>
+
+          <div class="sn-bug-list" id="sn-pw-list"></div>
+        </div>
+      </div>
     `;
     document.body.appendChild(overlay);
 
@@ -1121,6 +1494,8 @@
 	document.getElementById('sn-go-links').addEventListener('click', () => switchView('links'));
     document.getElementById('sn-go-mine').addEventListener('click', () => switchView('mine'));
     document.getElementById('sn-go-bugs').addEventListener('click', () => switchView('bugs'));
+    document.getElementById('sn-go-passwords').addEventListener('click', () => switchView('passwords'));
+    document.getElementById('sn-pw-back-btn').addEventListener('click', () => switchView('hub'));
 
     document.getElementById('sn-links-back-btn').addEventListener('click', () => switchView('hub'));
     document.getElementById('sn-mine-back-btn').addEventListener('click', () => switchView('hub'));
@@ -1129,6 +1504,7 @@
     initLinksManagerEvents();
     initMineEvents();
     initBugsEvents();
+    initPasswordEvents();
     initWorkspacePanelEvents();
     renderMineHubTile();
     renderBugsHubTile();
@@ -3548,6 +3924,408 @@
   }
 
 
+  // =====================================================================
+  // Password Expiry page (MAIN world). Data lives in the extension's storage, reached through the
+  // ISOLATED-world bridge, so the reset-page bar on other sites can update it too.
+  // =====================================================================
+  let pwAccounts = [];
+  let pwDetect = { enabled: false };
+  let pwStatus = null; // { enabled, access, registered, pageAvailable } from the background
+  let pwBridgeOk = null; // null = not tried yet
+  let pwFilter = 'all';
+  let pwEditingId = null;
+
+  const pwBridge = (() => {
+    const pending = new Map();
+    window.addEventListener('message', (e) => {
+      if (e.source !== window || !e.data) return;
+      if (e.data.__snsimp === 'res') {
+        const done = pending.get(e.data.id);
+        if (done) { pending.delete(e.data.id); done(e.data); }
+      } else if (e.data.__snsimp === 'changed') {
+        loadPwData().then(() => { if ((e.data.keys || []).includes('pwDetect')) refreshPwStatus(); });
+      }
+    });
+    function call(op, extra, timeoutMs = 6000) {
+      return new Promise((resolve) => {
+        const id = `pw${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+        const timer = setTimeout(() => { pending.delete(id); resolve({ ok: false, error: 'no-bridge' }); }, timeoutMs);
+        pending.set(id, (r) => { clearTimeout(timer); resolve(r); });
+        window.postMessage(Object.assign({ __snsimp: 'req', id, op }, extra || {}), location.origin);
+      });
+    }
+    return { call };
+  })();
+
+  async function loadPwData() {
+    const r = await pwBridge.call('get', { keys: ['pwAccounts', 'pwDetect'] });
+    if (!r.ok) {
+      pwBridgeOk = false;
+    } else {
+      pwBridgeOk = true;
+      pwAccounts = Array.isArray(r.data.pwAccounts) ? r.data.pwAccounts : [];
+      pwDetect = r.data.pwDetect || { enabled: false };
+    }
+    renderPasswords();
+    renderPwHubTile();
+  }
+
+  // Read the latest list, change it, write it back (another tab or the reset-page bar may have changed it)
+  async function savePwAccounts(mutate) {
+    const r = await pwBridge.call('get', { keys: ['pwAccounts'] });
+    if (!r.ok) {
+      showSimpleToast('🔑 Couldn\'t save', 'The extension\'s storage can\'t be reached. Refresh this page and try again.', '#ef4444');
+      return false;
+    }
+    const list = Array.isArray(r.data.pwAccounts) ? r.data.pwAccounts : [];
+    mutate(list);
+    const w = await pwBridge.call('set', { items: { pwAccounts: list } });
+    if (!w.ok) {
+      showSimpleToast('🔑 Couldn\'t save', 'The extension\'s storage can\'t be reached. Refresh this page and try again.', '#ef4444');
+      return false;
+    }
+    pwAccounts = list;
+    renderPasswords();
+    renderPwHubTile();
+    return true;
+  }
+
+  async function refreshPwStatus() {
+    const r = await pwBridge.call('pw-status');
+    pwStatus = r.ok && r.data && !r.data.error ? r.data : null;
+    renderPwDetect();
+  }
+
+  const pwFmtDate = (d) => (d ? d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '');
+  function pwParseDate(iso) {
+    if (!iso) return null;
+    const [y, m, d] = String(iso).split('-').map(Number);
+    return y ? new Date(y, (m || 1) - 1, d || 1) : null;
+  }
+  function pwDaysAgo(iso) {
+    const d = pwParseDate(iso);
+    if (!d) return '';
+    const t = new Date();
+    const n = Math.round((new Date(t.getFullYear(), t.getMonth(), t.getDate()) - d) / 86400000);
+    return n <= 0 ? 'today' : n === 1 ? 'yesterday' : `${n} days ago`;
+  }
+
+  function pwStatusPill(info) {
+    const n = info.daysLeft;
+    if (info.status === 'unknown') return { cls: 'sn-due-soon', text: 'Last change date not set' };
+    if (info.status === 'none') return { cls: 'sn-due-none', text: 'Doesn\'t expire' };
+    if (info.status === 'overdue') return { cls: 'sn-due-overdue', text: `Expired ${-n} day${n === -1 ? '' : 's'} ago` };
+    if (info.status === 'today') return { cls: 'sn-due-overdue', text: 'Expires today' };
+    if (info.status === 'soon') return { cls: 'sn-pw-soon', text: `Expires in ${n} day${n === 1 ? '' : 's'}` };
+    return { cls: 'sn-due-later', text: `Expires in ${n} days` };
+  }
+
+  const pwNeedsAttention = (a) => ['overdue', 'today', 'soon', 'unknown'].includes(pwDueInfo(a).status);
+
+  function pwSorted(list) {
+    const rank = { overdue: 0, today: 0, soon: 1, unknown: 2, ok: 3, none: 4 };
+    return list.slice().sort((x, y) => {
+      const a = pwDueInfo(x);
+      const b = pwDueInfo(y);
+      return (rank[a.status] - rank[b.status]) || ((a.daysLeft ?? 1e9) - (b.daysLeft ?? 1e9)) || String(x.name).localeCompare(String(y.name));
+    });
+  }
+
+  function pwHost(url) {
+    try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return ''; }
+  }
+
+  function renderPwDetect() {
+    const el = document.getElementById('sn-pw-detect');
+    if (!el) return;
+    if (pwBridgeOk === false) {
+      el.className = 'sn-pw-detect is-error';
+      el.innerHTML = `<div><strong>The extension's storage can't be reached.</strong> Refresh this page. After updating or reloading the extension, open ServiceNow tabs need a refresh.</div>`;
+      return;
+    }
+    const enabled = !!(pwStatus ? pwStatus.enabled && pwStatus.access : pwDetect.enabled);
+    const spotted = pwAccounts.filter((a) => a.resetUrl && a.detect !== 'off');
+    const hosts = [...new Set(spotted.map((a) => pwHost(a.resetUrl)).filter(Boolean))];
+    if (enabled) {
+      el.className = 'sn-pw-detect is-on';
+      el.innerHTML = `
+        <div class="sn-pw-detect-text">
+          <strong>✓ Reset page detection is on.</strong>
+          ${hosts.length ? `Opening a reset page on ${hosts.map((h) => `<span class="sn-pill sn-pill-ref">${escapeHtml(h)}</span>`).join(' ')} shows a bar asking if you reset that account's password; Yes records today's date.` : 'Add a reset page link to an account to have its reset page spotted.'}
+        </div>
+        <button class="sn-link-icon-btn" id="sn-pw-detect-off">Turn off</button>`;
+      return;
+    }
+    el.className = 'sn-pw-detect';
+    el.innerHTML = `
+      <div class="sn-pw-detect-text">
+        <strong>Reset page detection is off.</strong>
+        When it's on, opening one of your accounts' reset pages shows a bar asking if you reset its password, and a Yes updates the date for you.
+        Turning it on asks Edge to let the extension run on all websites; it only checks each page's address against your reset links.
+      </div>
+      <button class="sn-btn sn-btn-primary" id="sn-pw-detect-on" style="margin-top: 0;">Turn on</button>`;
+  }
+
+  function renderPasswords() {
+    renderPwDetect();
+    const listEl = document.getElementById('sn-pw-list');
+    const filterEl = document.getElementById('sn-pw-filter');
+    if (!listEl) return;
+    const attention = pwAccounts.filter(pwNeedsAttention).length;
+    if (filterEl) {
+      filterEl.innerHTML = [['all', `All (${pwAccounts.length})`], ['attention', `Due soon or expired (${attention})`]]
+        .map(([k, label]) => `<button class="sn-cat-pill ${pwFilter === k ? 'active' : ''}" data-pw-filter="${k}">${label}</button>`).join('');
+    }
+    if (pwBridgeOk === null) { listEl.innerHTML = '<div class="sn-empty-box">Loading…</div>'; return; }
+    const search = (document.getElementById('sn-pw-search')?.value || '').trim().toLowerCase();
+    const items = pwSorted(pwAccounts).filter((a) => {
+      if (pwFilter === 'attention' && !pwNeedsAttention(a)) return false;
+      if (!search) return true;
+      return [a.name, a.system, a.username, a.resetUrl, a.instructions].join(' ').toLowerCase().includes(search);
+    });
+    if (!items.length) {
+      listEl.innerHTML = `<div class="sn-empty-box">${pwAccounts.length === 0
+        ? 'No accounts yet. Click <strong>➕ Add account</strong> to start tracking when a password was last changed.'
+        : 'No accounts match this filter.'}</div>`;
+      return;
+    }
+    listEl.innerHTML = items.map((a) => {
+      const info = pwDueInfo(a);
+      const pill = pwStatusPill(info);
+      const hist = (a.history || []).slice(0, 4);
+      return `
+        <div class="sn-bug-card sn-pw-card sn-pw-card-${info.status}">
+          <div class="sn-bug-top">
+            <span class="sn-bug-title">🔑 ${escapeHtml(a.name)}</span>
+            <span class="sn-pill ${pill.cls}">${escapeHtml(pill.text)}</span>
+            ${a.system ? `<span class="sn-pill sn-pill-ref">${escapeHtml(a.system)}</span>` : ''}
+            ${a.username ? `<span class="sn-pill sn-pill-count" title="Username">👤 ${escapeHtml(a.username)}</span>` : ''}
+          </div>
+          <div class="sn-pw-dates">
+            <span>Last changed <strong>${a.lastChanged ? escapeHtml(pwFmtDate(pwParseDate(a.lastChanged))) : 'not set'}</strong>${a.lastChanged ? ` (${escapeHtml(pwDaysAgo(a.lastChanged))})` : ''}</span>
+            ${info.due ? `<span>Next change due <strong>${escapeHtml(pwFmtDate(info.due))}</strong> · every ${escapeHtml(a.expiryDays)} days</span>` : ''}
+          </div>
+          ${a.resetUrl ? `<div class="sn-pw-reset">
+            <a class="sn-pw-reset-link" href="${escapeHtml(a.resetUrl)}" target="_blank" rel="noopener noreferrer">Open reset page ↗</a>
+            <span class="sn-muted">${escapeHtml(pwHost(a.resetUrl))}${a.detect === 'off' ? ' · not spotted' : a.detect === 'page' ? ' · spotted on that page' : ' · spotted anywhere on the site'}</span>
+          </div>` : ''}
+          ${a.instructions ? `<details class="sn-pw-steps"${!a.resetUrl ? ' open' : ''}><summary>How to reset it</summary><div class="sn-pw-steps-body">${escapeHtml(a.instructions)}</div></details>` : ''}
+          <div class="sn-bug-footer">
+            <span class="sn-muted">${hist.length ? `Changed: ${hist.map((h) => `${escapeHtml(pwFmtDate(pwParseDate(h.date)))}${h.how === 'detected' ? ' (spotted)' : ''}`).join(', ')}` : 'No changes recorded yet'}</span>
+            <div class="sn-link-actions">
+              <button class="sn-link-icon-btn sn-pw-done-btn" data-pw-action="changed" data-id="${escapeHtml(a.id)}" title="Record today as the date it was changed">✓ Changed today</button>
+              <button class="sn-link-icon-btn" data-pw-action="edit" data-id="${escapeHtml(a.id)}">Edit</button>
+              <button class="sn-link-icon-btn danger" data-pw-action="delete" data-id="${escapeHtml(a.id)}">Delete</button>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  function renderPwHubTile() {
+    const badge = document.getElementById('sn-hub-pw-count');
+    const preview = document.getElementById('sn-hub-pw-preview');
+    if (!badge || !preview) return;
+    if (pwBridgeOk === false) { badge.innerText = '!'; badge.style.background = '#334155'; return; }
+    const infos = pwAccounts.map((a) => ({ a, info: pwDueInfo(a) }));
+    const overdue = infos.filter((x) => x.info.status === 'overdue' || x.info.status === 'today').length;
+    const soon = infos.filter((x) => x.info.status === 'soon').length;
+    badge.innerText = overdue ? `${overdue} Expired` : soon ? `${soon} Due soon` : `${pwAccounts.length} Tracked`;
+    badge.style.background = overdue ? '#dc2626' : soon ? '#b45309' : '#334155';
+    const next = pwSorted(pwAccounts).find((a) => pwDueInfo(a).due);
+    if (!pwAccounts.length) {
+      preview.innerHTML = '<p class="sn-hub-tool-desc">Track when your account passwords were last changed and when they expire. No passwords are stored.</p>';
+      return;
+    }
+    if (!next) {
+      preview.innerHTML = `<p class="sn-hub-tool-desc">${pwAccounts.length} account${pwAccounts.length === 1 ? '' : 's'} tracked. None has an expiry period set.</p>`;
+      return;
+    }
+    const info = pwDueInfo(next);
+    const pill = pwStatusPill(info);
+    preview.innerHTML = `
+      <div class="sn-tile-label">Next to expire${overdue ? ` · <span class="sn-tile-alert">${overdue} expired</span>` : ''}</div>
+      <div class="sn-tile-title">${escapeHtml(next.name)}</div>
+      <div class="sn-tile-meta"><span class="sn-pill ${pill.cls}">${escapeHtml(pill.text)}</span><span class="sn-pill sn-pill-ticket">${escapeHtml(pwFmtDate(info.due))}</span></div>`;
+  }
+
+  // Once a day per account: a toast (and a desktop notification if alerts are allowed) when it's due soon or expired
+  function checkPwReminders() {
+    if (!pwBridgeOk) return;
+    const today = pwToday();
+    let reminded = loadStoredJson('sn_helper_pw_reminded', {});
+    if (!reminded || typeof reminded !== 'object') reminded = {};
+    const due = pwAccounts.filter((a) => ['overdue', 'today', 'soon'].includes(pwDueInfo(a).status) && reminded[a.id] !== today);
+    if (!due.length) return;
+    due.forEach((a) => { reminded[a.id] = today; });
+    localStorage.setItem('sn_helper_pw_reminded', JSON.stringify(reminded));
+    const lines = due.map((a) => `${a.name}: ${pwStatusPill(pwDueInfo(a)).text.toLowerCase()}`);
+    const title = due.length === 1 ? '🔑 Password due for a change' : `🔑 ${due.length} passwords due for a change`;
+    showSimpleToast(title, lines.join(' • '), '#f59e0b', { label: 'Open Password Expiry →', onClick: () => { document.getElementById('sn-helper-overlay')?.classList.remove('sn-hidden'); switchView('passwords'); } });
+    try {
+      if ('Notification' in window && Notification.permission === 'granted') new Notification(title.replace('🔑 ', ''), { body: lines.join('\n') });
+    } catch (e) { /* ignore */ }
+  }
+
+  function initPasswordEvents() {
+    const formCard = document.getElementById('sn-pw-form-card');
+    const heading = document.getElementById('sn-pw-form-heading');
+    const listEl = document.getElementById('sn-pw-list');
+    const f = {
+      name: document.getElementById('sn-pw-name'),
+      system: document.getElementById('sn-pw-system'),
+      username: document.getElementById('sn-pw-username'),
+      last: document.getElementById('sn-pw-last'),
+      expiry: document.getElementById('sn-pw-expiry'),
+      warn: document.getElementById('sn-pw-warn'),
+      url: document.getElementById('sn-pw-url'),
+      detect: document.getElementById('sn-pw-detect-mode'),
+      steps: document.getElementById('sn-pw-steps')
+    };
+    const openForm = (acc) => {
+      pwEditingId = acc ? acc.id : null;
+      heading.innerText = acc ? `🔑 Edit ${acc.name}` : '🔑 Add account';
+      f.name.value = acc ? acc.name || '' : '';
+      f.system.value = acc ? acc.system || '' : '';
+      f.username.value = acc ? acc.username || '' : '';
+      f.last.value = acc ? acc.lastChanged || '' : pwToday();
+      f.expiry.value = acc ? (acc.expiryDays || '') : '90';
+      f.warn.value = acc ? (acc.warnDays ?? 14) : '14';
+      f.url.value = acc ? acc.resetUrl || '' : '';
+      f.detect.value = acc ? acc.detect || 'site' : 'site';
+      f.steps.value = acc ? acc.instructions || '' : '';
+      formCard.classList.remove('sn-hidden');
+      f.name.focus();
+    };
+    const closeForm = () => { formCard.classList.add('sn-hidden'); pwEditingId = null; };
+
+    document.getElementById('sn-pw-toggle-form-btn').addEventListener('click', () => {
+      if (!formCard.classList.contains('sn-hidden') && !pwEditingId) closeForm(); else openForm(null);
+    });
+    document.getElementById('sn-pw-cancel-btn').addEventListener('click', closeForm);
+    document.getElementById('sn-pw-save-btn').addEventListener('click', async () => {
+      const name = f.name.value.trim();
+      if (!name) { f.name.focus(); showSimpleToast('🔑 Name needed', 'Give the account a name.', '#ef4444'); return; }
+      const url = f.url.value.trim();
+      if (url && !/^https?:\/\//i.test(url)) { f.url.focus(); showSimpleToast('🔑 Check the link', 'The reset page link should start with https:// (or http://).', '#ef4444'); return; }
+      const expiry = parseInt(f.expiry.value, 10);
+      const warn = parseInt(f.warn.value, 10);
+      const values = {
+        name, system: f.system.value.trim(), username: f.username.value.trim(), lastChanged: f.last.value || '',
+        expiryDays: expiry > 0 ? expiry : null, warnDays: warn >= 0 ? warn : 14, resetUrl: url, detect: f.detect.value, instructions: f.steps.value.trim(), updatedAt: Date.now()
+      };
+      const editing = pwEditingId;
+      const ok = await savePwAccounts((list) => {
+        const existing = editing && list.find((a) => a.id === editing);
+        if (existing) {
+          if (values.lastChanged && values.lastChanged !== existing.lastChanged) existing.history = [{ date: values.lastChanged, how: 'edited' }, ...(existing.history || [])].slice(0, 20);
+          Object.assign(existing, values);
+        } else {
+          list.push(Object.assign({ id: `pw${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, createdAt: Date.now(), history: values.lastChanged ? [{ date: values.lastChanged, how: 'added' }] : [] }, values));
+        }
+      });
+      if (!ok) return;
+      closeForm();
+      showSimpleToast(editing ? '🔑 Account updated' : '🔑 Account added', name, '#22c55e');
+      if (url && values.detect !== 'off' && !pwDetect.enabled) setTimeout(() => showSimpleToast('🔑 Tip', 'Turn on reset page detection (top of the page) to have this reset page spotted when you visit it.', '#3b82f6'), 400);
+    });
+
+    document.getElementById('sn-pw-search').addEventListener('input', renderPasswords);
+    document.getElementById('sn-pw-filter').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pw-filter]');
+      if (!b) return;
+      pwFilter = b.getAttribute('data-pw-filter');
+      renderPasswords();
+    });
+
+    listEl.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-pw-action]');
+      if (!b) return;
+      const id = b.getAttribute('data-id');
+      const acc = pwAccounts.find((a) => a.id === id);
+      if (!acc) return;
+      const action = b.getAttribute('data-pw-action');
+      if (action === 'edit') { openForm(acc); formCard.scrollIntoView({ block: 'nearest' }); return; }
+      if (action === 'delete') {
+        if (!confirm(`Delete "${acc.name}" from Password Expiry?`)) return;
+        await savePwAccounts((list) => { const i = list.findIndex((a) => a.id === id); if (i >= 0) list.splice(i, 1); });
+        return;
+      }
+      if (action === 'changed') {
+        const today = pwToday();
+        await savePwAccounts((list) => {
+          const a = list.find((x) => x.id === id);
+          if (!a) return;
+          a.lastChanged = today;
+          a.history = [{ date: today, how: 'manual' }, ...(a.history || [])].slice(0, 20);
+          a.updatedAt = Date.now();
+        });
+        const info = pwDueInfo(pwAccounts.find((a) => a.id === id) || acc);
+        showSimpleToast('🔑 Recorded', `${acc.name}: changed today${info.due ? `, next due ${pwFmtDate(info.due)}` : ''}.`, '#22c55e');
+      }
+    });
+
+    document.getElementById('sn-pw-detect').addEventListener('click', async (e) => {
+      if (e.target.closest('#sn-pw-detect-on')) {
+        const r = await pwBridge.call('pw-open-access');
+        if (!r.ok || !r.data) { showSimpleToast('🔑 Couldn\'t start', 'The extension can\'t be reached. Refresh this page and try again.', '#ef4444'); return; }
+        if (r.data.error === 'missing-page') {
+          showSimpleToast('🔑 Update needed', 'This needs two new extension files. Run the latest Update Extension.bat (it now downloads them), reload the extension, then try again.', '#ef4444');
+          return;
+        }
+        showSimpleToast('🔑 One more step', 'A new tab has opened: click "Allow and turn on" there, then accept Edge\'s prompt.', '#3b82f6');
+      }
+      if (e.target.closest('#sn-pw-detect-off')) {
+        if (!confirm('Turn off reset page detection? The extension\'s access to other websites will be removed.')) return;
+        await pwBridge.call('pw-disable');
+        await loadPwData();
+        await refreshPwStatus();
+        showSimpleToast('🔑 Detection off', 'Reset pages won\'t be spotted any more. Your accounts are unchanged.', '#64748b');
+      }
+    });
+
+    document.getElementById('sn-pw-export-btn').addEventListener('click', () => {
+      const payload = { type: 'sn-simplifier-password-expiry', version: 1, exportedAt: new Date().toISOString(), accounts: pwAccounts };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `password-expiry-${pwToday()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    });
+    const importInput = document.getElementById('sn-pw-import-input');
+    document.getElementById('sn-pw-import-btn').addEventListener('click', () => importInput.click());
+    importInput.addEventListener('change', async () => {
+      const file = importInput.files && importInput.files[0];
+      importInput.value = '';
+      if (!file) return;
+      try {
+        const data = JSON.parse(await file.text());
+        if (!data || data.type !== 'sn-simplifier-password-expiry' || !Array.isArray(data.accounts)) throw new Error('This file is not a Password Expiry export.');
+        let added = 0;
+        let updated = 0;
+        const ok = await savePwAccounts((list) => {
+          data.accounts.forEach((inc) => {
+            if (!inc || !inc.name) return;
+            const clean = { id: inc.id, name: String(inc.name), system: inc.system || '', username: inc.username || '', lastChanged: inc.lastChanged || '', expiryDays: inc.expiryDays || null,
+              warnDays: inc.warnDays ?? 14, resetUrl: inc.resetUrl || '', detect: inc.detect || 'site', instructions: inc.instructions || '', history: Array.isArray(inc.history) ? inc.history.slice(0, 20) : [], createdAt: inc.createdAt || Date.now(), updatedAt: inc.updatedAt || Date.now() };
+            const existing = list.find((a) => (clean.id && a.id === clean.id) || a.name.toLowerCase() === clean.name.toLowerCase());
+            if (existing) {
+              if ((clean.lastChanged || '') >= (existing.lastChanged || '')) { Object.assign(existing, clean, { id: existing.id }); updated++; }
+            } else {
+              list.push(Object.assign(clean, { id: clean.id || `pw${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}` }));
+              added++;
+            }
+          });
+        });
+        if (ok) showSimpleToast('⬆ Accounts imported', `${added} new, ${updated} updated.`, '#22c55e');
+      } catch (err) {
+        showSimpleToast('⬆ Import failed', err.message, '#ef4444');
+      }
+    });
+  }
+
   // ----- Ticket state categories & "time in open state" -----
   let mineOpenSort = localStorage.getItem('sn_helper_mine_open_sort') === '1';
   let stateChoiceLabels = null; // { table: { value: label } } from sys_choice
@@ -4627,6 +5405,8 @@
         checkTaskReminders();
         setInterval(checkTaskReminders, TASK_REMINDER_CHECK_MS);
         initPersonalDataCrossTabSync();
+        loadPwData().then(() => { checkPwReminders(); if (currentView === 'passwords') refreshPwStatus(); });
+        setInterval(checkPwReminders, 60 * 60 * 1000);
         setInterval(checkForExtensionUpdate, UPDATE_CHECK_INTERVAL_MS);
       }
     }, 1500);

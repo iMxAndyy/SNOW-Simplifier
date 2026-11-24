@@ -16,6 +16,8 @@ if %errorlevel% neq 0 (
 
 curl -f -s -L -H "Accept: application/vnd.github.v3.raw" "https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/styles.css?ref=main" -o "%~dp0styles.css"
 curl -f -s -L -H "Accept: application/vnd.github.v3.raw" "https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/manifest.json?ref=main" -o "%~dp0manifest.json"
+curl -f -s -L -H "Accept: application/vnd.github.v3.raw" "https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/password-access.html?ref=main" -o "%~dp0password-access.html"
+curl -f -s -L -H "Accept: application/vnd.github.v3.raw" "https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/password-access.js?ref=main" -o "%~dp0password-access.js"
 
 color 0A
 echo [SUCCESS] Extension files have been updated to the latest version!
@@ -24,4 +26,4 @@ echo NEXT STEPS:
 echo 1. Go to edge://extensions (or chrome://extensions) and click the 'Reload' icon on ServiceNow Support Hub.
 echo 2. Return to your ServiceNow browser tab and press F5 (Refresh).
 echo.
-pause
+pause

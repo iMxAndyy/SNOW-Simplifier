@@ -1,20 +1,40 @@
 {
   "manifest_version": 3,
   "name": "ServiceNow Simplifier Dashboard",
-  "version": "1.0.6",
-  "description": "Auto-refreshing ticket queue and simplified UI for ServiceNow",
+  "version": "1.1.0",
+  "description": "Auto-refreshing ticket queue, simplified UI and personal tools for ServiceNow",
   "content_scripts": [
     {
-      "matches": ["https://wluk.service-now.com/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://wluk.service-now.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start"
     },
     {
-      "matches": ["https://wluk.service-now.com/*"],
-      "js": ["content.js"],
-      "css": ["styles.css"],
+      "matches": [
+        "https://wluk.service-now.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
       "world": "MAIN",
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "permissions": [
+    "storage",
+    "scripting"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "content.js"
+  }
 }

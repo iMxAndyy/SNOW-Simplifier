@@ -1253,7 +1253,7 @@
 
 .sn-hub-tools-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 18px;
 }
 
@@ -1288,7 +1288,13 @@
 .sn-hub-tool-top {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.sn-hub-tool-top .sn-hub-badge {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .sn-hub-tool-title {
@@ -1299,6 +1305,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  line-height: 1.3;
 }
 
 .sn-hub-tool-desc {
@@ -2529,3 +2537,71 @@
   font-size: 11.5px;
   opacity: 0.85;
 }
+
+
+/* ===== Password Expiry ===== */
+.sn-pw-detect {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-left: 4px solid #64748b;
+  border-radius: 10px;
+  color: #cbd5e1;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.sn-pw-detect.is-on { border-left-color: #22c55e; }
+.sn-pw-detect.is-error { border-left-color: #ef4444; }
+.sn-pw-detect-text { flex: 1; }
+.sn-pw-detect-text strong { color: #f1f5f9; margin-right: 4px; }
+.sn-pw-detect .sn-pill { margin: 0 2px; }
+
+.sn-pw-card { border-left-color: #334155; }
+.sn-pw-card-overdue, .sn-pw-card-today { border-left-color: #ef4444; }
+.sn-pw-card-soon { border-left-color: #f59e0b; }
+.sn-pw-card-unknown { border-left-color: #3b82f6; }
+.sn-pw-card-ok { border-left-color: #22c55e; }
+
+.sn-pw-soon { background: rgba(245, 158, 11, 0.18); color: #fde68a; border-color: rgba(245, 158, 11, 0.5); }
+
+.sn-pw-dates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 8px 0 4px;
+  font-size: 13px;
+  color: #94a3b8;
+}
+.sn-pw-dates strong { color: #e2e8f0; font-weight: 600; }
+
+.sn-pw-reset { display: flex; align-items: center; gap: 10px; margin: 8px 0 2px; font-size: 12.5px; }
+.sn-pw-reset-link {
+  display: inline-block;
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: #1e3a8a;
+  color: #dbeafe !important;
+  text-decoration: none !important;
+  font-weight: 600;
+}
+.sn-pw-reset-link:hover { background: #1d4ed8; }
+
+.sn-pw-steps { margin: 8px 0 2px; font-size: 13px; }
+.sn-pw-steps summary { cursor: pointer; color: #93c5fd; }
+.sn-pw-steps-body {
+  margin-top: 6px;
+  padding: 10px 12px;
+  background: #0b1220;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  color: #cbd5e1;
+  line-height: 1.5;
+}
+
+.sn-pw-done-btn { color: #86efac !important; border-color: rgba(34, 197, 94, 0.45) !important; }
+.sn-pw-form-note { font-size: 12px; color: #94a3b8; margin: 4px 0 8px; }
