@@ -286,7 +286,7 @@
   if (window.top !== window.self) return;
 
   // Version & GitHub Auto-Check Config
-  const FALLBACK_VERSION = '1.1.0'; // Only used if the manifest version can't be read
+  const FALLBACK_VERSION = '1.1.1'; // Only used if the manifest version can't be read
   const GITHUB_API_MANIFEST_URL = 'https://api.github.com/repos/iMxAndyy/SNOW-Simplifier/contents/manifest.json?ref=main';
   const GITHUB_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/manifest.json';
 
@@ -4056,6 +4056,18 @@
         <button class="sn-link-icon-btn" id="sn-pw-detect-off">Turn off</button>`;
       return;
     }
+    if (pwStatus && pwStatus.pageAvailable === false) {
+      el.className = 'sn-pw-detect is-warn';
+      el.innerHTML = `
+        <div class="sn-pw-detect-text">
+          <strong>Reset page detection needs an updated updater.</strong>
+          Turning it on uses two extension files that your copy of Update Extension.bat doesn't download yet.
+          Download the new updater, save it in your SNOW Simplifier folder in place of the old one, run it, then reload the extension and refresh this page.
+          The new updater keeps itself up to date from now on.
+        </div>
+        <button class="sn-btn sn-btn-primary" id="sn-pw-get-updater" style="margin-top: 0;">⬇ Download the new updater</button>`;
+      return;
+    }
     el.className = 'sn-pw-detect';
     el.innerHTML = `
       <div class="sn-pw-detect-text">
@@ -4167,6 +4179,29 @@
     } catch (e) { /* ignore */ }
   }
 
+  // The latest Update Extension.bat from GitHub, saved as a download (falls back to its GitHub page)
+  const UPDATER_RAW_URL = 'https://raw.githubusercontent.com/iMxAndyy/SNOW-Simplifier/main/Update%20Extension.bat';
+  const UPDATER_PAGE_URL = 'https://github.com/iMxAndyy/SNOW-Simplifier/blob/main/Update%20Extension.bat';
+  async function pwDownloadUpdater() {
+    try {
+      const res = await fetch(`${UPDATER_RAW_URL}?t=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      if (!/curl/i.test(text)) throw new Error('unexpected file');
+      const blob = new Blob([text.replace(/\r?\n/g, '\r\n')], { type: 'application/octet-stream' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'Update Extension.bat';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      showSimpleToast('⬇ Updater downloaded', 'Move "Update Extension.bat" from Downloads into your SNOW Simplifier folder (replace the old one), run it, then reload the extension.', '#3b82f6');
+    } catch (e) {
+      window.open(UPDATER_PAGE_URL, '_blank', 'noopener');
+      showSimpleToast('⬇ Get the updater from GitHub', 'A GitHub tab has opened: use its download button, then put the file in your SNOW Simplifier folder in place of the old one.', '#3b82f6');
+    }
+  }
+
   function initPasswordEvents() {
     const formCard = document.getElementById('sn-pw-form-card');
     const heading = document.getElementById('sn-pw-form-heading');
@@ -4270,10 +4305,15 @@
         const r = await pwBridge.call('pw-open-access');
         if (!r.ok || !r.data) { showSimpleToast('🔑 Couldn\'t start', 'The extension can\'t be reached. Refresh this page and try again.', '#ef4444'); return; }
         if (r.data.error === 'missing-page') {
-          showSimpleToast('🔑 Update needed', 'This needs two new extension files. Run the latest Update Extension.bat (it now downloads them), reload the extension, then try again.', '#ef4444');
+          showSimpleToast('🔑 Update needed', 'This needs two extension files your updater doesn\'t download yet. Get the new Update Extension.bat, run it, reload the extension, then try again.', '#ef4444', { label: '⬇ Download the new updater', onClick: pwDownloadUpdater });
+          refreshPwStatus();
           return;
         }
         showSimpleToast('🔑 One more step', 'A new tab has opened: click "Allow and turn on" there, then accept Edge\'s prompt.', '#3b82f6');
+      }
+      if (e.target.closest('#sn-pw-get-updater')) {
+        pwDownloadUpdater();
+        return;
       }
       if (e.target.closest('#sn-pw-detect-off')) {
         if (!confirm('Turn off reset page detection? The extension\'s access to other websites will be removed.')) return;

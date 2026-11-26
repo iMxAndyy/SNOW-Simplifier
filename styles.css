@@ -2556,6 +2556,7 @@
 }
 .sn-pw-detect.is-on { border-left-color: #22c55e; }
 .sn-pw-detect.is-error { border-left-color: #ef4444; }
+.sn-pw-detect.is-warn { border-left-color: #f59e0b; }
 .sn-pw-detect-text { flex: 1; }
 .sn-pw-detect-text strong { color: #f1f5f9; margin-right: 4px; }
 .sn-pw-detect .sn-pill { margin: 0 2px; }
